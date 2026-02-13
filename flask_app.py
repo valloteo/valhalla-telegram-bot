@@ -37,7 +37,7 @@ AUTHORIZED = set()
 PENDING = set()
 LAST_DOWNLOAD = {}
 
-# Carica utenti autorizzati da variabile d'ambiente
+# Carica utenti autorizzati
 if AUTH_USERS_CSV:
     for _id in AUTH_USERS_CSV.split(","):
         _id = _id.strip()
@@ -53,11 +53,9 @@ if OWNER_ID:
 # ======================================
 
 def now_epoch():
-    """Restituisce timestamp corrente in secondi."""
     return time.time()
 
 def epoch_to_str(e):
-    """Converte timestamp in stringa leggibile."""
     try:
         dt = datetime.fromtimestamp(e, tz=timezone.utc).astimezone()
         return dt.strftime("%d/%m/%Y %H:%M")
@@ -65,7 +63,6 @@ def epoch_to_str(e):
         return "più tardi"
 
 def haversine_km(a, b):
-    """Distanza approssimata tra due coordinate (km)."""
     R = 6371.0
     lat1, lon1 = radians(a[0]), radians(a[1])
     lat2, lon2 = radians(b[0]), radians(b[1])
@@ -75,7 +72,6 @@ def haversine_km(a, b):
     return 2 * R * atan2(sqrt(h), sqrt(1-h))
 
 def approx_total_km_from_locs(locs, roundtrip):
-    """Calcola distanza approssimata tra i punti forniti."""
     if not locs or len(locs) < 2:
         return 0.0
     total = 0.0
@@ -94,7 +90,6 @@ def approx_total_km_from_locs(locs, roundtrip):
 # ======================================
 
 def send_message(chat_id, text, reply_markup=None):
-    """Invia messaggio Telegram."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
@@ -102,7 +97,6 @@ def send_message(chat_id, text, reply_markup=None):
     requests.post(url, json=payload, timeout=15)
 
 def send_document(chat_id, file_bytes, filename, caption=None):
-    """Invia file GPX."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
     files = {"document": (filename, file_bytes, "application/octet-stream")}
     data = {"chat_id": chat_id}
@@ -111,7 +105,6 @@ def send_document(chat_id, file_bytes, filename, caption=None):
     requests.post(url, data=data, files=files, timeout=30)
 
 def send_photo(chat_id, file_bytes, caption=None):
-    """Invia immagine PNG."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
     files = {"photo": ("route.png", file_bytes, "image/png")}
     data = {"chat_id": chat_id}
@@ -120,7 +113,6 @@ def send_photo(chat_id, file_bytes, caption=None):
     requests.post(url, data=data, files=files, timeout=30)
 
 def answer_callback_query(cq_id, text=None):
-    """Risponde ai pulsanti inline."""
     url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
     payload = {"callback_query_id": cq_id}
     if text:
@@ -132,7 +124,6 @@ def answer_callback_query(cq_id, text=None):
 # ======================================
 
 def geocode_address(q):
-    """Converte indirizzo in coordinate tramite Nominatim."""
     if not q:
         return None
     url = "https://nominatim.openstreetmap.org/search"
@@ -150,7 +141,6 @@ def geocode_address(q):
         return None
 
 def parse_location_from_message(msg):
-    """Estrae coordinate da messaggio Telegram."""
     if "location" in msg:
         loc = msg["location"]
         return (loc["latitude"], loc["longitude"])
@@ -164,7 +154,6 @@ def parse_location_from_message(msg):
 # ======================================
 
 def build_gpx_with_turns(coords, maneuvers, name="Percorso Moto"):
-    """Genera GPX con turn-by-turn."""
     gpx = gpxpy.gpx.GPX()
     trk = gpxpy.gpx.GPXTrack(name=name)
     seg = gpxpy.gpx.GPXTrackSegment()
@@ -185,7 +174,6 @@ def build_gpx_with_turns(coords, maneuvers, name="Percorso Moto"):
     return gpx.to_xml().encode("utf-8")
 
 def build_gpx_simple(coords, name="Percorso Moto (semplice)"):
-    """Genera GPX semplice senza turn-by-turn."""
     gpx = gpxpy.gpx.GPX()
     trk = gpxpy.gpx.GPXTrack(name=name)
     seg = gpxpy.gpx.GPXTrackSegment()
@@ -202,7 +190,6 @@ def build_gpx_simple(coords, name="Percorso Moto (semplice)"):
 # ======================================
 
 def decode_polyline6(polyline_str):
-    """Decodifica polyline Valhalla (precisione 1e-6)."""
     index, lat, lng, coords = 0, 0, 0, []
     changes = {"lat": 0, "lng": 0}
     while index < len(polyline_str):
@@ -220,6 +207,182 @@ def decode_polyline6(polyline_str):
         lng += changes["lng"]
         coords.append((lat / 1e6, lng / 1e6))
     return coords
+# ======================================
+# UI / MESSAGGI / PULSANTI
+# ======================================
+
+WELCOME = (
+    "🏍️ *Benvenuto nel MotoRoute Bot!*\n\n"
+    "Genera *GPX (turn-by-turn)*, un *GPX semplice* e una *mappa PNG*.\n\n"
+    "1️⃣ Invia la *partenza*\n"
+    "2️⃣ Scegli *Round Trip* o *Destinazione*\n"
+    "3️⃣ (Opz.) aggiungi fino a *4 waypoint*\n"
+    "4️⃣ Scegli lo *stile*\n\n"
+    "🔒 Limiti: 120 km totali · 80 km raggio · RT 70–80 km"
+)
+
+ASK_END = "Perfetto! Ora manda la *destinazione*."
+ASK_WAYPOINTS = "Vuoi aggiungere waypoint? Invia posizione/indirizzo oppure premi *Fine*."
+ASK_STYLE_TEXT = "Scegli lo *stile* del percorso:"
+ASK_DIRECTION = "Scegli una *direzione iniziale* per l'anello (opzionale)."
+PROCESSING = "⏳ Sto calcolando il percorso…"
+INVALID_INPUT = "❌ Non riesco a capire questo indirizzo/posizione."
+LIMITS_EXCEEDED = "⚠️ Supera i limiti. Riduci distanza/waypoint."
+ROUTE_NOT_FOUND = "❌ Nessun percorso trovato."
+CANCELLED = "🛑 Operazione annullata."
+RESTARTED = "🔄 Ricominciamo! Invia la *partenza*."
+NOT_AUTH = "🔒 Accesso riservato. Ho inviato la tua richiesta all’owner."
+ACCESS_GRANTED = "✅ Sei stato abilitato!"
+ACCESS_DENIED = "❌ La tua richiesta è stata rifiutata."
+RATE_LIMIT_MSG = "⏱️ Limite 1 download/settimana. Riprova dopo: *{when}*."
+
+def style_inline_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "🛣️ Standard", "callback_data": "style:standard"}],
+            [
+                {"text": "🌀 Curvy leggero", "callback_data": "style:curvy_light"},
+                {"text": "🌀🌀 Curvy", "callback_data": "style:curvy"}
+            ],
+            [{"text": "🌀🌀🌀 Super Curvy (Premium)", "callback_data": "style:super_curvy"}],
+            [
+                {"text": "❌ Annulla", "callback_data": "action:cancel"},
+                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
+            ]
+        ]
+    }
+
+def start_options_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Round Trip", "callback_data": "action:roundtrip_now"},
+                {"text": "➡️ Destinazione", "callback_data": "action:set_end"}
+            ],
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}]
+        ]
+    }
+
+def waypoints_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Fine", "callback_data": "action:finish_waypoints"}],
+            [
+                {"text": "❌ Annulla", "callback_data": "action:cancel"},
+                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
+            ]
+        ]
+    }
+
+def direction_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⬆️ N", "callback_data": "dir:N"},
+                {"text": "↗️ NE", "callback_data": "dir:NE"},
+                {"text": "➡️ E", "callback_data": "dir:E"},
+                {"text": "↘️ SE", "callback_data": "dir:SE"},
+            ],
+            [
+                {"text": "⬇️ S", "callback_data": "dir:S"},
+                {"text": "↙️ SW", "callback_data": "dir:SW"},
+                {"text": "⬅️ W", "callback_data": "dir:W"},
+                {"text": "↖️ NW", "callback_data": "dir:NW"},
+            ],
+            [{"text": "⏭️ Salta (NE)", "callback_data": "dir:skip"}]
+        ]
+    }
+
+def cancel_restart_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "❌ Annulla", "callback_data": "action:cancel"},
+                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
+            ]
+        ]
+    }
+
+def admin_request_keyboard(uid:int, name:str):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": f"✅ Approva {name} ({uid})", "callback_data": f"admin:approve:{uid}"},
+                {"text": "❌ Rifiuta", "callback_data": f"admin:deny:{uid}"}
+            ]
+        ]
+    }
+
+# ======================================
+# RESET STATE (fondamentale!)
+# ======================================
+
+def reset_state(uid):
+    USER_STATE[uid] = {
+        "phase": "start",
+        "start": None,
+        "end": None,
+        "waypoints": [],
+        "style": None,
+        "roundtrip": False,
+        "direction": None
+    }
+
+# ======================================
+# ROUND TRIP LOGIC
+# ======================================
+
+BEARING_MAP = {
+    "N": 0, "NE": 45, "E": 90, "SE": 135,
+    "S": 180, "SW": 225, "W": 270, "NW": 315
+}
+
+def offset_point(lat, lon, km, bearing_deg):
+    R = 6371.0
+    br = radians(bearing_deg)
+    lat1 = radians(lat); lon1 = radians(lon)
+    d = km / R
+    lat2 = asin(sin(lat1)*cos(d) + cos(lat1)*sin(d)*cos(br))
+    lon2 = lon1 + atan2(
+        sin(br)*sin(d)*cos(lat1),
+        cos(d) - sin(lat1)*sin(lat2)
+    )
+    return (lat2*180/pi, lon2*180/pi)
+
+def seed_roundtrip_locations(start_lat, start_lon, base_km, bearing_deg):
+    a_bearing = (bearing_deg + 90) % 360
+    b_bearing = (bearing_deg + 180) % 360
+    wp_a = offset_point(start_lat, start_lon, base_km, a_bearing)
+    wp_b = offset_point(start_lat, start_lon, base_km * 0.9, b_bearing)
+    return [{"lat": wp_a[0], "lon": wp_a[1]},
+            {"lat": wp_b[0], "lon": wp_b[1]}]
+
+def tune_roundtrip_length(start_lat, start_lon, waypoints, desired_min=RT_TARGET_MIN, desired_max=RT_TARGET_MAX, bearing_deg=45):
+    if waypoints:
+        base_candidates = [18, 20, 22]
+    else:
+        base_candidates = [18, 20, 22, 24, 26]
+
+    best = None
+    for base in base_candidates:
+        locs = [{"lat": start_lat, "lon": start_lon}]
+        if waypoints:
+            locs += [{"lat": w[0], "lon": w[1]} for w in waypoints]
+        else:
+            locs += seed_roundtrip_locations(start_lat, start_lon, base, bearing_deg)
+
+        approx = approx_total_km_from_locs(locs, roundtrip=True)
+
+        score = 1000 if desired_min <= approx <= desired_max else -abs((desired_min + desired_max)/2 - approx)
+
+        if best is None or score > best[0]:
+            best = (score, base, locs, approx)
+
+        if desired_min <= approx <= desired_max:
+            break
+
+    _, used_base, best_locs, approx_km = best
+    return best_locs, used_base, approx_km
 # ======================================
 # VALHALLA COSTING
 # ======================================
@@ -452,6 +615,119 @@ def healthz():
         authorized=len(AUTHORIZED)
     )
 # ======================================
+# CALCOLO PERCORSO E INVIO RISULTATI
+# ======================================
+
+def compute_route_and_send(uid, chat_id):
+    """Legge lo stato utente, calcola il percorso, invia PNG + GPX, applica rate limit."""
+    state = USER_STATE.get(uid)
+    if not state:
+        send_message(chat_id, "❌ Stato utente non trovato. Ricomincia con /start.")
+        return
+
+    style = state.get("style")
+    is_owner = (uid == OWNER_ID)
+
+    start = state.get("start")
+    end = state.get("end")
+    wps = state.get("waypoints", [])
+    roundtrip = state.get("roundtrip", False)
+
+    if not start:
+        send_message(chat_id, "❌ Partenza mancante. Ricomincia con /start.")
+        return
+
+    # --- Build locations ---
+    if roundtrip:
+        locs = [{"lat": start[0], "lon": start[1]}]
+        for w in wps:
+            locs.append({"lat": w[0], "lon": w[1]})
+        bearing = BEARING_MAP.get(state.get("direction") or "NE", 45)
+        locs, used_base, approx_km = tune_roundtrip_length(
+            start[0], start[1],
+            wps,
+            desired_min=RT_TARGET_MIN,
+            desired_max=RT_TARGET_MAX,
+            bearing_deg=bearing
+        )
+    else:
+        if not end:
+            send_message(chat_id, "❌ Destinazione mancante. Ricomincia con /start.")
+            return
+        locs = [{"lat": start[0], "lon": start[1]}]
+        for w in wps:
+            locs.append({"lat": w[0], "lon": w[1]})
+        locs.append({"lat": end[0], "lon": end[1]})
+
+    # --- Limits ---
+    approx = approx_total_km_from_locs(locs, roundtrip)
+    if approx > MAX_ROUTE_KM:
+        send_message(chat_id, LIMITS_EXCEEDED)
+        reset_state(uid)
+        return
+
+    # --- Route calculation ---
+    try:
+        coords, total_km, total_min, maneuvers = valhalla_route(
+            locs,
+            style=style,
+            roundtrip=roundtrip,
+            is_owner=is_owner
+        )
+    except PermissionError:
+        send_message(chat_id, "🔒 *Funzione Premium riservata all’owner.*")
+        return
+    except Exception:
+        send_message(chat_id, ROUTE_NOT_FOUND)
+        reset_state(uid)
+        return
+
+    # --- PNG ---
+    coords_simplified = simplify_coords(coords, max_points=80)
+    map_url = build_static_map_url(
+        coords_simplified,
+        start=start,
+        end=(start if roundtrip else end),
+        waypoints=wps
+    )
+    png_bytes = download_static_map(map_url) if map_url else None
+
+    # --- GPX ---
+    gpx_turns = build_gpx_with_turns(coords, maneuvers)
+    gpx_simple = build_gpx_simple(coords)
+
+    # --- Rate limit ---
+    last = LAST_DOWNLOAD.get(uid, 0)
+    now = now_epoch()
+    if uid != OWNER_ID and (now - last) < RATE_LIMIT_DAYS * 86400:
+        when = epoch_to_str(last + RATE_LIMIT_DAYS * 86400)
+        send_message(chat_id, RATE_LIMIT_MSG.format(when=when))
+        reset_state(uid)
+        return
+
+    LAST_DOWNLOAD[uid] = now
+
+    # --- Send PNG ---
+    if png_bytes:
+        send_photo(chat_id, png_bytes, caption="🗺️ *Mappa del percorso*")
+
+    # --- Send GPX ---
+    send_document(chat_id, gpx_turns, "percorso_turns.gpx", caption="📍 GPX con istruzioni")
+    send_document(chat_id, gpx_simple, "percorso_simple.gpx", caption="📍 GPX semplice")
+
+    # --- Summary ---
+    send_message(
+        chat_id,
+        f"🏁 *Percorso generato!*\n\n"
+        f"📏 *Distanza:* {total_km} km\n"
+        f"⏱️ *Tempo stimato:* {total_min} min\n"
+        f"🌀 *Stile:* {style.replace('_', ' ')}\n"
+        f"📍 *Round Trip:* {'Sì' if roundtrip else 'No'}"
+    )
+
+    reset_state(uid)
+
+# ======================================
 # WEBHOOK
 # ======================================
 
@@ -565,115 +841,12 @@ def webhook(token):
             state["style"] = style
             state["phase"] = "style_selected"
             send_message(chat_id, PROCESSING)
+
+            # Calcolo immediato del percorso
+            compute_route_and_send(uid, chat_id)
             return jsonify(ok=True)
 
         return jsonify(ok=True)
-
-    # ---------------------------------------------------------
-    # STYLE SELECTED → CALCOLO PERCORSO
-    # ---------------------------------------------------------
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        chat_id = cq["message"]["chat"]["id"]
-        uid = cq["from"]["id"]
-        state = USER_STATE.get(uid, {})
-
-        if state.get("phase") == "style_selected":
-            style = state["style"]
-            is_owner = (uid == OWNER_ID)
-
-            start = state["start"]
-            end = state["end"]
-            wps = state["waypoints"]
-            roundtrip = state["roundtrip"]
-
-            # --- Build locations ---
-            if roundtrip:
-                locs = [{"lat": start[0], "lon": start[1]}]
-                for w in wps:
-                    locs.append({"lat": w[0], "lon": w[1]})
-                bearing = BEARING_MAP.get(state["direction"], 45)
-                locs, used_base, approx_km = tune_roundtrip_length(
-                    start[0], start[1],
-                    wps,
-                    desired_min=RT_TARGET_MIN,
-                    desired_max=RT_TARGET_MAX,
-                    bearing_deg=bearing
-                )
-            else:
-                locs = [{"lat": start[0], "lon": start[1]}]
-                for w in wps:
-                    locs.append({"lat": w[0], "lon": w[1]})
-                locs.append({"lat": end[0], "lon": end[1]})
-
-            # --- Limits ---
-            approx = approx_total_km_from_locs(locs, roundtrip)
-            if approx > MAX_ROUTE_KM:
-                send_message(chat_id, LIMITS_EXCEEDED)
-                reset_state(uid)
-                return jsonify(ok=True)
-
-            # --- Route calculation ---
-            try:
-                coords, total_km, total_min, maneuvers = valhalla_route(
-                    locs,
-                    style=style,
-                    roundtrip=roundtrip,
-                    is_owner=is_owner
-                )
-            except PermissionError:
-                send_message(chat_id, "🔒 *Funzione Premium riservata all’owner.*")
-                return jsonify(ok=True)
-            except Exception:
-                send_message(chat_id, ROUTE_NOT_FOUND)
-                reset_state(uid)
-                return jsonify(ok=True)
-
-            # --- PNG ---
-            coords_simplified = simplify_coords(coords, max_points=80)
-            map_url = build_static_map_url(
-                coords_simplified,
-                start=start,
-                end=(start if roundtrip else end),
-                waypoints=wps
-            )
-            png_bytes = download_static_map(map_url) if map_url else None
-
-            # --- GPX ---
-            gpx_turns = build_gpx_with_turns(coords, maneuvers)
-            gpx_simple = build_gpx_simple(coords)
-
-            # --- Rate limit ---
-            last = LAST_DOWNLOAD.get(uid, 0)
-            now = now_epoch()
-            if uid != OWNER_ID and (now - last) < RATE_LIMIT_DAYS * 86400:
-                when = epoch_to_str(last + RATE_LIMIT_DAYS * 86400)
-                send_message(chat_id, RATE_LIMIT_MSG.format(when=when))
-                reset_state(uid)
-                return jsonify(ok=True)
-
-            LAST_DOWNLOAD[uid] = now
-
-            # --- Send PNG ---
-            if png_bytes:
-                send_photo(chat_id, png_bytes, caption="🗺️ *Mappa del percorso*")
-
-            # --- Send GPX ---
-            send_document(chat_id, gpx_turns, "percorso_turns.gpx", caption="📍 GPX con istruzioni")
-            send_document(chat_id, gpx_simple, "percorso_simple.gpx", caption="📍 GPX semplice")
-
-            # --- Summary ---
-            send_message(
-                chat_id,
-                f"🏁 *Percorso generato!*\n\n"
-                f"📏 *Distanza:* {total_km} km\n"
-                f"⏱️ *Tempo stimato:* {total_min} min\n"
-                f"🌀 *Stile:* {style.replace('_', ' ')}\n"
-                f"📍 *Round Trip:* {'Sì' if roundtrip else 'No'}"
-            )
-
-            reset_state(uid)
-            return jsonify(ok=True)
 
     # ---------------------------------------------------------
     # MESSAGGI NORMALI
@@ -752,10 +925,10 @@ def webhook(token):
             return jsonify(ok=True)
 
     return jsonify(ok=True)
-
 # ======================================
 # AVVIO FLASK
 # ======================================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
