@@ -7,25 +7,24 @@ import gpxpy
 import gpxpy.gpx
 
 # ======================================
-# CONFIGURAZIONE
+# CONFIG
 # ======================================
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "").rstrip("/")
 
-MAX_WAYPOINTS = 4       # <-- NUOVO LIMITE
+MAX_WAYPOINTS = 4
 MAX_ROUTE_KM = 120
-MAX_RADIUS_KM = 80      # solo per Start → End (non per roundtrip)
+MAX_RADIUS_KM = 80  # solo per A→B (non roundtrip)
 
 app = Flask(__name__)
-USER_STATE = {}         # memoria conversazione in RAM
+USER_STATE = {}
 
 # ======================================
-# UTILS GENERALI
+# UTILS
 # ======================================
 
 def haversine_km(a, b):
-    """Distanza linea d’aria tra due coordinate."""
     R = 6371.0
     lat1, lon1 = radians(a[0]), radians(a[1])
     lat2, lon2 = radians(b[0]), radians(b[1])
@@ -36,23 +35,18 @@ def haversine_km(a, b):
 
 def send_message(chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     requests.post(url, json=payload, timeout=15)
 
 def send_document(chat_id, file_bytes, filename, caption=None):
-    """Invia un file al bot."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
     files = {"document": (filename, file_bytes, "application/octet-stream")}
     data = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption
-    requests.post(url, data=data, files=files, timeout=25)
+    requests.post(url, data=data, files=files, timeout=30)
 
 def answer_callback_query(cq_id, text=None):
     url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
@@ -61,15 +55,8 @@ def answer_callback_query(cq_id, text=None):
         payload["text"] = text
     requests.post(url, json=payload, timeout=10)
 
-# ======================================
-# GEOLOCATION / GEOCODING
-# ======================================
-
+# ---------- Geocoding indirizzi ----------
 def geocode_address(q):
-    """
-    Converte un indirizzo testuale in coordinate usando Nominatim (OSM).
-    Restituisce (lat, lon) oppure None.
-    """
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": q, "format": "json", "limit": 1}
     headers = {"User-Agent": "MotoGPXBot/1.0"}
@@ -85,20 +72,11 @@ def geocode_address(q):
         return None
 
 def parse_location_from_message(msg):
-    """
-    Accetta:
-    - posizione telegram
-    - testo "lat,lon"
-    - indirizzo (geocoding)
-    """
-    # 1) posizione Telegram
     if "location" in msg:
         loc = msg["location"]
         return (loc["latitude"], loc["longitude"])
 
     text = (msg.get("text") or "").strip()
-
-    # 2) lat,lon
     if "," in text:
         try:
             parts = text.split(",")
@@ -106,37 +84,21 @@ def parse_location_from_message(msg):
         except:
             pass
 
-    # 3) indirizzo → geocoding
-    coords = geocode_address(text)
-    return coords  # può essere None
+    return geocode_address(text)
 
-# ======================================
-# FORMATO GOOGLE MAPS
-# ======================================
-
+# ---------- Google Maps link ----------
 def build_gmaps_url(start, end, waypoints):
-    """Crea link Google Maps Directions"""
     origin = f"{start[0]},{start[1]}"
     destination = f"{end[0]},{end[1]}"
     wp_list = [f"{lat},{lon}" for (lat, lon) in waypoints] if waypoints else []
 
-    params = {
-        "api": "1",
-        "origin": origin,
-        "destination": destination,
-    }
+    params = {"api": "1", "origin": origin, "destination": destination}
     if wp_list:
         params["waypoints"] = "|".join(wp_list)
 
-    return (
-        "https://www.google.com/maps/dir/?"
-        + urllib.parse.urlencode(params, safe="|,")
-    )
+    return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(params, safe="|,")
 
-# ======================================
-# FILE GPX
-# ======================================
-
+# ---------- GPX ----------
 def build_gpx(coords, name="Percorso"):
     gpx = gpxpy.gpx.GPX()
     trk = gpxpy.gpx.GPXTrack(name=name)
@@ -149,14 +111,8 @@ def build_gpx(coords, name="Percorso"):
 
     return gpx.to_xml().encode("utf-8")
 
-# ======================================
-# FILE KML (per Google Maps / MyMaps)
-# ======================================
-
+# ---------- KML ----------
 def build_kml(coords):
-    """
-    Genera un file KML compatibile con Google MyMaps.
-    """
     kml_points = ""
     for lat, lon in coords:
         kml_points += f"{lon},{lat},0\n"
@@ -167,28 +123,17 @@ def build_kml(coords):
     <name>Percorso Moto</name>
     <Placemark>
         <name>Percorso</name>
-        <Style>
-            <LineStyle>
-                <color>ff0000ff</color>
-                <width>4</width>
-            </LineStyle>
-        </Style>
-        <LineString>
-            <tessellate>1</tessellate>
-            <coordinates>
+        <Style><LineStyle><color>ff0000ff</color><width>4</width></LineStyle></Style>
+        <LineString><tessellate>1</tessellate><coordinates>
 {kml_points}
-            </coordinates>
-        </LineString>
+        </coordinates></LineString>
     </Placemark>
 </Document>
 </kml>
 """
     return kml.encode("utf-8")
 
-# ======================================
-# DECODE POLYLINE VALHALLA
-# ======================================
-
+# ---------- Polyline decoder (precisione 6) ----------
 def decode_polyline6(polyline_str):
     index, lat, lng, coords = 0, 0, 0, []
     changes = {"lat": 0, "lng": 0}
@@ -207,50 +152,50 @@ def decode_polyline6(polyline_str):
         lng += changes["lng"]
         coords.append((lat / 1e6, lng / 1e6))
     return coords
-    # ======================================
-# MESSAGGI E UI (PULSANTI)
+
+# ---------- Seed per Round Trip se mancano waypoint ----------
+def add_roundtrip_seed_if_needed(locs, d_km=10.0):
+    # Se c'è solo lo start, aggiunge 2 waypoint sintetici per creare un anello corto
+    if len(locs) == 1:
+        lat = locs[0]["lat"]
+        lon = locs[0]["lon"]
+        # conversioni approssimative km→gradi
+        dlat = d_km / 110.574
+        denom = max(0.1, cos(radians(lat)))  # evita divisione per ~0
+        dlon = d_km / (111.320 * denom)
+        wp1 = {"lat": lat + dlat, "lon": lon + dlon}
+        wp2 = {"lat": lat + dlat * 0.5, "lon": lon - dlon}
+        locs.extend([wp1, wp2])
+    return locs
+
+# ======================================
+# UI / MESSAGGI / PULSANTI
 # ======================================
 
 WELCOME = (
     "🏍️ *Benvenuto nel MotoRoute Bot!*\n\n"
-    "Posso generare un percorso *GPX*, *KML* e un link per *Google Maps*.\n\n"
-    "📌 *Come funziona:*\n"
+    "Genera *GPX*, *KML* e un link *Google Maps*.\n\n"
     "1️⃣ Invia la *partenza* (posizione, `lat,lon` o indirizzo)\n"
-    "2️⃣ Invia la *destinazione*\n"
-    "3️⃣ (Opzionale) Aggiungi fino a *4 waypoint*\n"
-    "4️⃣ Scegli lo *stile di guida* o il *Round Trip*\n\n"
-    "🔒 *Limiti versione base*\n"
-    "• Distanza max: 120 km\n"
-    "• Destinazione entro 80 km (solo per A → B)\n"
-    "• Max 4 waypoint\n"
-    "• Solo asfalto\n\n"
-    "Puoi iniziare inviando la partenza! 🗺️"
+    "2️⃣ Scegli *Round Trip* subito oppure imposta la *destinazione*\n"
+    "3️⃣ (Opz.) aggiungi fino a *4 waypoint*, poi *Fine*\n"
+    "4️⃣ Scegli *Standard* o *Curvy*\n\n"
+    "🔒 *Limiti*: 120 km totali · 80 km raggio per A→B · 4 waypoint · solo asfalto"
 )
 
 ASK_END = "Perfetto! Ora manda la *destinazione* (posizione, `lat,lon` o indirizzo)."
 ASK_WAYPOINTS = (
-    "Vuoi aggiungere *waypoint*? Puoi inserirne fino a 4.\n"
-    "👉 Invia una posizione, coordinate o indirizzo\n"
-    "👉 Quando hai finito, scrivi: `fine`\n\n"
-    "Oppure usa i pulsanti qui sotto:"
+    "Vuoi aggiungere *waypoint*? Fino a 4.\n"
+    "Invia una posizione/indirizzo, oppure premi *Fine*."
 )
-
-ASK_STYLE_TEXT = "Seleziona lo *stile di guida* oppure un *Round Trip*:"
-
+ASK_STYLE_TEXT = "Seleziona lo *stile* o un *Round Trip*:"
 PROCESSING = "⏳ Sto calcolando il percorso…"
-
-INVALID_INPUT = "❌ Formato non valido. Invia posizione, `lat,lon` oppure un indirizzo valido."
-LIMITS_EXCEEDED = "⚠️ Supera i limiti della versione free. Riduci distanza o waypoint."
+INVALID_INPUT = "❌ Formato non valido. Invia posizione, `lat,lon` oppure un indirizzo."
+LIMITS_EXCEEDED = "⚠️ Supera i limiti della versione free. Riduci distanza/waypoint."
 ROUTE_NOT_FOUND = "❌ Nessun percorso trovato. Modifica i punti e riprova."
 CANCELLED = "🛑 Operazione annullata. Usa /start per ricominciare."
 RESTARTED = "🔄 Conversazione ricominciata! Invia la *partenza*."
 
-# ======================================
-# FUNZIONI PULSANTI INLINE
-# ======================================
-
 def style_inline_keyboard():
-    """Pulsanti per selezione stile + roundtrip."""
     return {
         "inline_keyboard": [
             [
@@ -264,7 +209,6 @@ def style_inline_keyboard():
     }
 
 def cancel_restart_keyboard():
-    """Pulsanti Annulla / Ricomincia"""
     return {
         "inline_keyboard": [
             [
@@ -274,9 +218,27 @@ def cancel_restart_keyboard():
         ]
     }
 
-# ======================================
-# RESET DELLO STATO
-# ======================================
+def start_options_keyboard():
+    return {
+        "inline_keyboard": [[
+            {"text": "🔄 Round Trip da qui", "callback_data": "action:roundtrip_now"},
+            {"text": "➡️ Imposta Destinazione", "callback_data": "action:set_end"}
+        ],
+        [
+            {"text": "❌ Annulla", "callback_data": "action:cancel"}
+        ]]
+    }
+
+def waypoints_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Fine", "callback_data": "action:finish_waypoints"}],
+            [
+                {"text": "❌ Annulla", "callback_data": "action:cancel"},
+                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
+            ]
+        ]
+    }
 
 def reset_state(uid):
     USER_STATE[uid] = {
@@ -284,43 +246,51 @@ def reset_state(uid):
         "start": None,
         "end": None,
         "waypoints": [],
-        "style": None
+        "style": None,
+        "roundtrip": False
     }
-    # ======================================
-# FUNZIONE DI ROUTING CON VALHALLA
+
+# ======================================
+# VALHALLA ROUTING
 # ======================================
 
 def valhalla_route(locations, style="standard", roundtrip=False):
-    """
-    locations = [{"lat":..., "lon":...}, ...]
-    style = standard | curvy | roundtrip
-    roundtrip=True → aggiunge automaticamente ultimo punto = start
-    """
     if not VALHALLA_URL:
         raise RuntimeError("VALHALLA_URL non configurato.")
 
-    # Se roundtrip attivo → chiudiamo il loop con Start come ultimo punto
+    # Chiudi l’anello se roundtrip
     if roundtrip:
         start = locations[0]
         locations = locations + [{"lat": start["lat"], "lon": start["lon"]}]
 
-    costing_options = {}
-    if style == "curvy":
-        costing_options = {
-            "auto": {
-                "use_highways": 0.0,
-                "avoid_bad_surfaces": True
-            }
+    def build_payload(costing_name):
+        curvy_opts = {
+            "use_highways": 0.0,         # evita/penalizza motorways/trunk
+            "avoid_bad_surfaces": True   # penalizza superfici scarse/non asfaltate
+        }
+        if costing_name == "motorcycle":
+            curvy_opts["exclude_unpaved"] = True  # dove supportato
+
+        co = {}
+        if style in ("curvy", "roundtrip"):
+            co[costing_name] = curvy_opts
+
+        return {
+            "locations": locations,
+            "costing": costing_name,
+            "costing_options": co,
+            "directions_options": {"units": "km"}
         }
 
-    payload = {
-        "locations": locations,
-        "costing": "auto",
-        "costing_options": costing_options,
-        "directions_options": {"units": "km"}
-    }
-
+    # 1) Prova motorcycle
+    payload = build_payload("motorcycle")
     r = requests.post(f"{VALHALLA_URL}/route", json=payload, timeout=30)
+
+    # 2) Fallback ad auto
+    if r.status_code != 200:
+        payload = build_payload("auto")
+        r = requests.post(f"{VALHALLA_URL}/route", json=payload, timeout=30)
+
     if r.status_code != 200:
         raise RuntimeError(f"Valhalla error: {r.status_code} {r.text[:200]}")
 
@@ -335,45 +305,45 @@ def valhalla_route(locations, style="standard", roundtrip=False):
         shape = leg.get("shape")
         if shape:
             coords.extend(decode_polyline6(shape))
-
         summary = leg.get("summary", {})
         total_km += float(summary.get("length", 0.0))      # km
         total_min += float(summary.get("time", 0.0)) / 60  # minuti
 
     return coords, round(total_km, 1), round(total_min, 1)
 
-
 # ======================================
-# WEBHOOK TELEGRAM (cuore del bot)
+# ROUTES
 # ======================================
 
+@app.route("/", methods=["GET"])
+def home():
+    return "OK - MotoRoute Bot (Valhalla) online."
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return jsonify(status="ok", valhalla=bool(VALHALLA_URL), max_wp=MAX_WAYPOINTS)
+
+# Webhook flessibile: /webhook/<token> con check del token
 @app.route("/webhook/<path:token>", methods=["POST"])
 def webhook(token):
-
-    # Sicurezza: conferma che token nel path = token configurato
     if token != os.environ.get("TELEGRAM_TOKEN"):
         return jsonify(ok=False, error="forbidden"), 403
 
     update = request.get_json(silent=True) or {}
 
-    # =====================================================================
-    # 1) CALLBACK QUERY (pulsanti)
-    # =====================================================================
+    # ---------- CALLBACK (pulsanti) ----------
     if "callback_query" in update:
         cq = update["callback_query"]
         data = cq.get("data", "")
         chat_id = cq["message"]["chat"]["id"]
         uid = cq["from"]["id"]
-
         answer_callback_query(cq["id"])
 
         if uid not in USER_STATE:
             reset_state(uid)
         state = USER_STATE[uid]
 
-        # ---------------------
-        # Pulsanti Annulla / Ricomincia
-        # ---------------------
+        # Annulla / Ricomincia
         if data == "action:cancel":
             reset_state(uid)
             send_message(chat_id, CANCELLED)
@@ -384,39 +354,58 @@ def webhook(token):
             send_message(chat_id, RESTARTED)
             return jsonify(ok=True)
 
-        # ---------------------
-        # Pulsanti stile
-        # ---------------------
+        # Scelta dopo Start
+        if data == "action:set_end":
+            state["roundtrip"] = False
+            state["phase"] = "end"
+            send_message(chat_id, ASK_END, reply_markup=cancel_restart_keyboard())
+            return jsonify(ok=True)
+
+        if data == "action:roundtrip_now":
+            state["roundtrip"] = True
+            state["end"] = None
+            state["phase"] = "waypoints"
+            send_message(
+                chat_id,
+                "Round Trip dalla partenza.\nAggiungi waypoint opzionali oppure premi *Fine*.",
+                reply_markup=waypoints_keyboard()
+            )
+            return jsonify(ok=True)
+
+        # Fine waypoint (passa alla scelta stile)
+        if data == "action:finish_waypoints":
+            state["phase"] = "style"
+            send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
+            return jsonify(ok=True)
+
+        # Selezione stile (standard/curvy/roundtrip)
         if data.startswith("style:"):
             style = data.split(":", 1)[1]
-
-            # Round Trip?
             is_roundtrip = (style == "roundtrip")
-
-            # Messaggio di attesa
-            send_message(chat_id, PROCESSING)
-
             # Prepara locations
             locs = [{"lat": state["start"][0], "lon": state["start"][1]}]
             for wp in state["waypoints"]:
                 locs.append({"lat": wp[0], "lon": wp[1]})
 
-            # Se NON roundtrip, aggiungi End
-            if not is_roundtrip:
+            if is_roundtrip:
+                # se non ci sono waypoint, genera un piccolo anello
+                locs = add_roundtrip_seed_if_needed(locs)
+            else:
+                # A→B: serve end
                 locs.append({"lat": state["end"][0], "lon": state["end"][1]})
 
-            # Esegui routing
+            send_message(chat_id, PROCESSING)
+
             try:
                 coords, dist_km, time_min = valhalla_route(
                     locs,
-                    style="curvy" if style == "curvy" else "standard",
+                    style=("curvy" if style == "curvy" else "standard"),
                     roundtrip=is_roundtrip
                 )
             except Exception as e:
                 send_message(chat_id, f"Errore routing:\n{str(e)[:250]}")
                 return jsonify(ok=True)
 
-            # Validazione distanza 120 km
             if dist_km > MAX_ROUTE_KM:
                 send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
                 return jsonify(ok=True)
@@ -425,18 +414,16 @@ def webhook(token):
                 send_message(chat_id, ROUTE_NOT_FOUND)
                 return jsonify(ok=True)
 
-            # Invia GPX
+            # File
             gpx_bytes = build_gpx(coords, "Percorso Moto")
             send_document(chat_id, gpx_bytes, "route.gpx",
                           caption=f"Distanza: {dist_km} km · Durata: {time_min} min")
 
-            # Invia KML
             kml_bytes = build_kml(coords)
             send_document(chat_id, kml_bytes, "route.kml")
 
             # Link Google Maps
             if is_roundtrip:
-                # In un roundtrip End = Start
                 gmaps_url = build_gmaps_url(state["start"], state["start"], state["waypoints"])
             else:
                 gmaps_url = build_gmaps_url(state["start"], state["end"], state["waypoints"])
@@ -446,27 +433,23 @@ def webhook(token):
             reset_state(uid)
             return jsonify(ok=True)
 
-        # Callback sconosciuto
+        # Callback non gestito
         return jsonify(ok=True)
 
-    # =====================================================================
-    # 2) MESSAGGI NORMALI
-    # =====================================================================
+    # ---------- MESSAGGI NORMALI ----------
     msg = update.get("message")
     if not msg:
         return jsonify(ok=True)
 
     chat_id = msg["chat"]["id"]
     uid = msg["from"]["id"]
-    text = (msg.get("text") or "").lower().strip()
+    text = (msg.get("text") or "").strip().lower()
 
     if uid not in USER_STATE:
         reset_state(uid)
     state = USER_STATE[uid]
 
-    # ---------------------
     # Comandi globali
-    # ---------------------
     if text == "/start":
         reset_state(uid)
         send_message(chat_id, WELCOME)
@@ -482,12 +465,9 @@ def webhook(token):
         send_message(chat_id, RESTARTED)
         return jsonify(ok=True)
 
-    # ---------------------
-    # Fasi conversazione
-    # ---------------------
     phase = state["phase"]
 
-    # === PHASE: START ===
+    # START → scegli RoundTrip subito o End
     if phase == "start":
         loc = parse_location_from_message(msg)
         if not loc:
@@ -495,77 +475,77 @@ def webhook(token):
             return jsonify(ok=True)
 
         state["start"] = loc
-        state["phase"] = "end"
-        send_message(chat_id, ASK_END, reply_markup=cancel_restart_keyboard())
+        state["phase"] = "choose_route_type"
+        send_message(chat_id,
+                     "Vuoi partire subito con un *Round Trip* o impostare una *destinazione*?",
+                     reply_markup=start_options_keyboard())
         return jsonify(ok=True)
 
-    # === PHASE: END ===
+    # END
     if phase == "end":
         loc = parse_location_from_message(msg)
         if not loc:
             send_message(chat_id, INVALID_INPUT)
             return jsonify(ok=True)
 
-        # Limite 80 km (solo percorso A → B — non roundtrip)
         if haversine_km(state["start"], loc) > MAX_RADIUS_KM:
-            send_message(chat_id,
-                         "⚠️ La destinazione è oltre *80 km* in linea d’aria dal punto di partenza.")
+            send_message(chat_id, "⚠️ La destinazione è oltre *80 km* in linea d’aria dalla partenza.")
             return jsonify(ok=True)
 
         state["end"] = loc
         state["phase"] = "waypoints"
-        send_message(chat_id, ASK_WAYPOINTS, reply_markup=cancel_restart_keyboard())
+        send_message(chat_id, ASK_WAYPOINTS, reply_markup=waypoints_keyboard())
         return jsonify(ok=True)
 
-    # === PHASE: WAYPOINTS ===
+    # WAYPOINTS
     if phase == "waypoints":
-
-        # Utente termina l'aggiunta
+        # Qui preferiamo il pulsante ✅ Fine, ma gestiamo anche input testuale "fine"
         if text == "fine":
             state["phase"] = "style"
             send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
             return jsonify(ok=True)
 
-        # Aggiunge un waypoint
         loc = parse_location_from_message(msg)
         if not loc:
             send_message(chat_id, INVALID_INPUT)
             return jsonify(ok=True)
 
         if len(state["waypoints"]) >= MAX_WAYPOINTS:
-            send_message(chat_id,
-                         f"Hai già {MAX_WAYPOINTS} waypoint.\nScrivi `fine` per continuare.")
+            send_message(chat_id, f"Hai già {MAX_WAYPOINTS} waypoint.\nPremi *Fine* per continuare.")
             return jsonify(ok=True)
 
         state["waypoints"].append(loc)
-        send_message(chat_id,
-                     f"Waypoint aggiunto ({len(state['waypoints'])}/{MAX_WAYPOINTS}).\n"
-                     "Invia un altro oppure scrivi `fine`.",
-                     reply_markup=cancel_restart_keyboard())
+        send_message(
+            chat_id,
+            f"Waypoint aggiunto ({len(state['waypoints'])}/{MAX_WAYPOINTS}). "
+            "Aggiungine un altro oppure premi *Fine*.",
+            reply_markup=waypoints_keyboard()
+        )
         return jsonify(ok=True)
 
-    # === PHASE: STYLE (se l’utente scrive invece di premere pulsanti) ===
+    # STYLE (fallback se l’utente scrive invece di premere i pulsanti)
     if phase == "style":
         if text not in ("standard", "curvy", "roundtrip"):
             send_message(chat_id, "Scegli `standard`, `curvy` o `roundtrip`, oppure usa i pulsanti.")
             return jsonify(ok=True)
 
-        # Emula callback style:
-        style = text
-        is_roundtrip = (style == "roundtrip")
-        send_message(chat_id, PROCESSING)
+        is_roundtrip = (text == "roundtrip")
 
         locs = [{"lat": state["start"][0], "lon": state["start"][1]}]
         for wp in state["waypoints"]:
             locs.append({"lat": wp[0], "lon": wp[1]})
 
-        if not is_roundtrip:
+        if is_roundtrip:
+            locs = add_roundtrip_seed_if_needed(locs)
+        else:
             locs.append({"lat": state["end"][0], "lon": state["end"][1]})
+
+        send_message(chat_id, PROCESSING)
 
         try:
             coords, dist_km, time_min = valhalla_route(
                 locs,
-                style="curvy" if style == "curvy" else "standard",
+                style=("curvy" if text == "curvy" else "standard"),
                 roundtrip=is_roundtrip
             )
         except Exception as e:
@@ -576,7 +556,10 @@ def webhook(token):
             send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
             return jsonify(ok=True)
 
-        # GPX + KML
+        if not coords or len(coords) < 2:
+            send_message(chat_id, ROUTE_NOT_FOUND)
+            return jsonify(ok=True)
+
         gpx_bytes = build_gpx(coords, "Percorso Moto")
         send_document(chat_id, gpx_bytes, "route.gpx",
                       caption=f"Distanza: {dist_km} km · Durata: {time_min} min")
@@ -584,28 +567,14 @@ def webhook(token):
         kml_bytes = build_kml(coords)
         send_document(chat_id, kml_bytes, "route.kml")
 
-        # Google Maps link
         if is_roundtrip:
             gmaps_url = build_gmaps_url(state["start"], state["start"], state["waypoints"])
         else:
             gmaps_url = build_gmaps_url(state["start"], state["end"], state["waypoints"])
-
         send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
 
         reset_state(uid)
         return jsonify(ok=True)
 
-    # Caso imprevisto
     send_message(chat_id, "❓ Usa /start per cominciare.")
     return jsonify(ok=True)
-    # ======================================
-# ROUTE DI SERVIZIO (HOME / HEALTH)
-# ======================================
-
-@app.route("/", methods=["GET"])
-def home():
-    return "OK - MotoRoute Bot (Valhalla) online."
-
-@app.route("/healthz", methods=["GET"])
-def healthz():
-    return jsonify(status="ok", valhalla=bool(VALHALLA_URL), max_wp=MAX_WAYPOINTS)
