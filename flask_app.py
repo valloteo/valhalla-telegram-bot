@@ -160,8 +160,13 @@ def reset_state(uid):
 def home():
     return "OK - Bot Valhalla online."
 
-@app.route(f"/webhook/{os.environ.get('TELEGRAM_TOKEN', 'token')}", methods=["POST"])
-def webhook():
+@app.route("/webhook/<path:token>", methods=["POST"])
+def webhook(token):
+
+    # Se il token nel path NON coincide con quello in environment → rifiuta
+    if token != os.environ.get("TELEGRAM_TOKEN"):
+        return jsonify(ok=False, error="forbidden"), 403
+
     update = request.get_json(silent=True) or {}
     msg = update.get("message")
     if not msg:
@@ -231,7 +236,6 @@ def webhook():
         state["style"] = style
         send_message(chat_id, PROCESSING)
 
-        # Prepara locations per Valhalla
         locs = [{"lat": state["start"][0], "lon": state["start"][1]}]
         for wp in state["waypoints"]:
             locs.append({"lat": wp[0], "lon": wp[1]})
