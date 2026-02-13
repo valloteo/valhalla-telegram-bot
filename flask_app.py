@@ -2,7 +2,7 @@ import os
 import time
 import json
 import urllib.parse
-from math import radians, sin, cos, sqrt, atan2
+from math import radians, sin, cos, sqrt, atan2, asin, degrees
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import requests
@@ -16,35 +16,26 @@ import gpxpy.gpx
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "").rstrip("/")
 VALHALLA_URL_FALLBACK = os.environ.get("VALHALLA_URL_FALLBACK", "").rstrip("/")
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
-AUTH_USERS_CSV = os.environ.get("AUTH_USERS_CSV", "").strip()
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # imposta il tuo Telegram user id
 
 MAX_WAYPOINTS = 4
 MAX_ROUTE_KM = 120
-MAX_RADIUS_KM = 80   # solo per A→B (non roundtrip)
-RATE_LIMIT_DAYS = 7  # 1 download/settimana (owner escluso)
+MAX_RADIUS_KM = 80      # solo per A→B (non roundtrip)
+RATE_LIMIT_DAYS = 7     # 1 download a settimana (owner escluso)
 
-# Altimetria (OpenTopoData)
-ELEV_PROVIDER_URL = "https://api.opentopodata.org/v1/srtm90m"
-ELEV_SAMPLE_M = 50.0     # campionamento dettagliato lungo il percorso
-ELEV_QUERY_STEP = 4      # interroga provider ~ogni 200m (4 * 50m), il resto interpolato
-ELEV_BATCH = 100         # punti per batch
-ELEV_BATCH_SLEEP = 1.0   # secondi tra batch (rate limit)
+# Round Trip hard limits richiesti
+RT_MIN_KM = 70.0
+RT_MAX_KM = 80.0
+RT_TARGET_KM = (RT_MIN_KM + RT_MAX_KM) / 2.0
 
 app = Flask(__name__)
 
-# Stati in memoria (Render free: si svuotano ai riavvii)
+# Memorie in-process (Render free: si azzerano ai riavvii)
 USER_STATE = {}
 AUTHORIZED = set()
 PENDING = set()
 LAST_DOWNLOAD = {}  # uid -> epoch seconds
 
-# Pre-semina allowlist statica
-if AUTH_USERS_CSV:
-    for _id in AUTH_USERS_CSV.split(","):
-        _id = _id.strip()
-        if _id.isdigit():
-            AUTHORIZED.add(int(_id))
 if OWNER_ID:
     AUTHORIZED.add(OWNER_ID)
 
@@ -55,7 +46,7 @@ if OWNER_ID:
 def now_epoch() -> float:
     return time.time()
 
-def epoch_to_str(e: float) -> str:
+def epoch_to_local(e: float) -> str:
     try:
         dt = datetime.fromtimestamp(e, tz=timezone.utc).astimezone()
         return dt.strftime("%d/%m/%Y %H:%M")
@@ -72,6 +63,7 @@ def haversine_km(a, b):
     return 2 * R * atan2(sqrt(h), sqrt(1-h))
 
 def approx_total_km_from_locs(locs, roundtrip: bool) -> float:
+    """Somma Haversine tra locations Valhalla [{'lat':..,'lon':..}] + chiusura."""
     if not locs or len(locs) < 2:
         return 0.0
     total = 0.0
@@ -127,6 +119,7 @@ def parse_location_from_message(msg):
     if "location" in msg:
         loc = msg["location"]
         return (loc["latitude"], loc["longitude"])
+
     text = (msg.get("text") or "").strip()
     if "," in text:
         try:
@@ -134,24 +127,40 @@ def parse_location_from_message(msg):
             return (float(parts[0].strip()), float(parts[1].strip()))
         except:
             pass
+
     return geocode_address(text)
 
-# ---------- Google Maps link ----------
+# ---------- Helpers stringhe/coordinate ----------
+def fmt_latlon(lat: float, lon: float) -> str:
+    return f"{lat:.6f},{lon:.6f}"
+
 def build_gmaps_url(start, end, waypoints):
-    origin = f"{start[0]},{start[1]}"
-    destination = f"{end[0]},{end[1]}"
-    wp_list = [f"{lat},{lon}" for (lat, lon) in waypoints] if waypoints else []
-    params = {"api": "1", "origin": origin, "destination": destination}
-    if wp_list:
-        params["waypoints"] = "|".join(wp_list)
+    """
+    Costruisce Google Maps Directions URL.
+    - start/end: tuple (lat, lon)
+    - waypoints: list[tuple(lat, lon)]
+    """
+    origin = fmt_latlon(start[0], start[1])
+    destination = fmt_latlon(end[0], end[1])
+    params = {
+        "api": "1",
+        "origin": origin,
+        "destination": destination,
+        "travelmode": "driving",
+    }
+    if waypoints:
+        wps = [fmt_latlon(lat, lon) for (lat, lon) in waypoints]
+        params["waypoints"] = "|".join(wps)
+
+    # Nota: safe='|,'
     return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(params, safe="|,")
 
 # ---------- GPX ----------
-def build_gpx(coords, name="Percorso", elevations=None, maneuvers=None):
+def build_gpx_with_turns(coords, maneuvers, name="Percorso"):
     """
-    coords: [(lat, lon), ...]
-    elevations: [ele_m, ...] (opzionale, stessa lunghezza di coords)
-    maneuvers: [{"lat":..., "lon":..., "text":...}, ...] (opzionale)
+    Crea un GPX con:
+    - Track della geometria
+    - Waypoint per le manovre (turn-by-turn)
     """
     gpx = gpxpy.gpx.GPX()
     trk = gpxpy.gpx.GPXTrack(name=name)
@@ -159,23 +168,26 @@ def build_gpx(coords, name="Percorso", elevations=None, maneuvers=None):
     trk.segments.append(seg)
     gpx.tracks.append(trk)
 
-    for i, (lat, lon) in enumerate(coords):
-        ele = None
-        if elevations and i < len(elevations):
-            ele = elevations[i]
-        seg.points.append(gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon, elevation=ele))
+    for lat, lon in coords:
+        seg.points.append(gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon))
 
-    # Route con turn-by-turn (maneuvers)
-    if maneuvers:
-        rte = gpxpy.gpx.GPXRoute(name="Istruzioni")
-        for m in maneuvers:
-            try:
-                rte.points.append(
-                    gpxpy.gpx.GPXRoutePoint(latitude=m["lat"], longitude=m["lon"], name=m.get("text", ""))
-                )
-            except:
-                pass
-        gpx.routes.append(rte)
+    # Aggiungi waypoint manovre
+    for m in maneuvers:
+        ll = m.get("begin_shape_index")
+        title = m.get("instruction") or m.get("street_names", [""])[0] if m.get("street_names") else m.get("type", "maneuver")
+        # posizione approssimativa dal shape_index
+        if isinstance(ll, int) and 0 <= ll < len(coords):
+            lat, lon = coords[ll]
+        else:
+            # fallback: usa il center LL se presente
+            lat = m.get("lat", coords[0][0])
+            lon = m.get("lon", coords[0][1])
+        wp = gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, name=title)
+        # descrizione con distanza del segmento (se disponibile)
+        dist = m.get("length", 0.0)  # km
+        if dist:
+            wp.description = f"{title} — {dist:.1f} km"
+        gpx.waypoints.append(wp)
 
     return gpx.to_xml().encode("utf-8")
 
@@ -183,7 +195,8 @@ def build_gpx(coords, name="Percorso", elevations=None, maneuvers=None):
 def build_kml(coords):
     kml_points = ""
     for lat, lon in coords:
-        kml_points += f"{lon},{lat},0\n"
+        kml_points += f"{lon:.6f},{lat:.6f},0\n"
+
     kml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
 <Document>
@@ -220,183 +233,68 @@ def decode_polyline6(polyline_str):
         coords.append((lat / 1e6, lng / 1e6))
     return coords
 
-# ---------- Offsets e seed per Round Trip ----------
+# ---------- Geo helpers (bearing / offset) ----------
 def offset_point(lat, lon, km, bearing_deg):
+    """
+    Sposta il punto (lat, lon) di 'km' con bearing 'bearing_deg' (sfera).
+    """
     R = 6371.0
+    d = km / R
     br = radians(bearing_deg)
     lat1 = radians(lat)
     lon1 = radians(lon)
-    d = km / R
-    lat2 = asin_clamped(sin(lat1)*cos(d) + cos(lat1)*sin(d)*cos(br))
-    lon2 = lon1 + atan2(sin(br)*sin(d)*cos(lat1), cos(d)-sin(lat1)*sin(lat2))
-    return (degrees_clamped(lat2), degrees_clamped(lon2))
+    lat2 = asin(sin(lat1)*cos(d) + cos(lat1)*sin(d)*cos(br))
+    lon2 = lon1 + atan2(sin(br)*sin(d)*cos(lat1), cos(d) - sin(lat1)*sin(lat2))
+    return (degrees(lat2), degrees(lon2))
 
-def asin_clamped(x):
-    if x > 1: x = 1
-    if x < -1: x = -1
-    return atan2(x, sqrt(1 - x*x))
+BEARING_BY_DIR = {
+    "N": 0, "NE": 45, "E": 90, "SE": 135,
+    "S": 180, "SW": 225, "W": 270, "NW": 315
+}
 
-def degrees_clamped(rad):
-    return rad * 180.0 / 3.141592653589793
+def seeds_from_bearing(start_lat, start_lon, d_km, bearing_deg):
+    """
+    Genera due seed a partire dal bearing iniziale (±60°) per creare un anello.
+    """
+    b1 = (bearing_deg + 60) % 360
+    b2 = (bearing_deg - 60) % 360
+    s1 = offset_point(start_lat, start_lon, d_km, b1)
+    s2 = offset_point(start_lat, start_lon, d_km, b2)
+    return [{"lat": s1[0], "lon": s1[1]}, {"lat": s2[0], "lon": s2[1]}]
 
-def add_roundtrip_seed_if_needed(locs, d_km=5.0, variant=1):
-    # Se c'è solo lo start, aggiunge 2 waypoint sintetici per creare un anello corto
-    if len(locs) == 1:
-        lat = locs[0]["lat"]
-        lon = locs[0]["lon"]
-        # 2 varianti per ridurre overlap
-        if variant == 1:
-            bearings = (60, 300)
-        else:
-            bearings = (120, 240)
-        # seed a ~5 km
-        (lat1, lon1) = offset_point(lat, lon, d_km, bearings[0])
-        (lat2, lon2) = offset_point(lat, lon, d_km, bearings[1])
-        wp1 = {"lat": lat1, "lon": lon1}
-        wp2 = {"lat": lat2, "lon": lon2}
-        locs.extend([wp1, wp2])
-    return locs
-
-# ---------- Resample path every ~50m ----------
-def resample_path(coords, spacing_m=50.0):
-    if not coords or len(coords) < 2:
-        return coords[:]
-    out = [coords[0]]
-    accum = 0.0
-    i = 0
-    while i < len(coords) - 1:
+# ---------- Overlap heuristic ----------
+def overlap_score(coords, min_sep=50, near_m=15.0):
+    """
+    Euristica: conteggia quante volte la traccia passa entro 'near_m' metri
+    da un punto non adiacente (separazione di almeno 'min_sep' punti).
+    Maggiore = peggio (più overlap / ritorni).
+    """
+    if not coords or len(coords) < (min_sep + 5):
+        return 0
+    near_count = 0
+    # campiona con passo per non esplodere O(n^2)
+    step = max(1, len(coords)//2000)
+    for i in range(0, len(coords), step):
         a = coords[i]
-        b = coords[i+1]
-        seg_km = haversine_km(a, b)
-        seg_m = seg_km * 1000.0
-        if seg_m + accum >= spacing_m:
-            # frazione lungo il segmento
-            need = spacing_m - accum
-            f = need / seg_m if seg_m > 0 else 0
-            lat = a[0] + (b[0] - a[0]) * f
-            lon = a[1] + (b[1] - a[1]) * f
-            out.append((lat, lon))
-            # spostiamo il punto "a" a questa nuova posizione
-            coords[i] = (lat, lon)
-            accum = 0.0
-        else:
-            accum += seg_m
-            i += 1
-    if out[-1] != coords[-1]:
-        out.append(coords[-1])
-    return out
-
-# ---------- Elevation: batch calls + interpolation ----------
-def fetch_elevations_batched(points):
-    """
-    points: [(lat, lon), ...]
-    Ritorna [ele_m or None, ...] stessa lunghezza, usando batch e backoff.
-    """
-    if not points:
-        return []
-
-    elevations = [None] * len(points)
-    # Query ogni ELEV_QUERY_STEP punto (es. 200m), il resto lo interpoliamo
-    idx_to_query = list(range(0, len(points), ELEV_QUERY_STEP))
-    if idx_to_query[-1] != len(points)-1:
-        idx_to_query.append(len(points)-1)
-
-    # Batch
-    for start in range(0, len(idx_to_query), ELEV_BATCH):
-        batch_idx = idx_to_query[start:start+ELEV_BATCH]
-        locs_param = "|".join(f"{points[i][0]},{points[i][1]}" for i in batch_idx)
-        try:
-            r = requests.get(ELEV_PROVIDER_URL, params={"locations": locs_param}, timeout=20)
-            if r.ok:
-                data = r.json()
-                res = data.get("results", [])
-                for k, i_pt in enumerate(batch_idx):
-                    if k < len(res):
-                        elevations[i_pt] = res[k].get("elevation")
-            else:
-                # fallisce: restituisce tutti None per questo batch
-                pass
-        except Exception:
-            pass
-        time.sleep(ELEV_BATCH_SLEEP)
-
-    # Interpolazione lineare dei None compresi tra due noti
-    # (semplice e robusta per uso moto)
-    last_known = None
-    for i in range(len(elevations)):
-        if elevations[i] is not None:
-            if last_known is None:
-                # riempi fino al primo noto
-                for j in range(0, i):
-                    elevations[j] = elevations[i]
-            else:
-                # interpola tra last_known e i
-                j0 = last_known
-                j1 = i
-                v0 = elevations[j0]
-                v1 = elevations[j1]
-                span = j1 - j0
-                if span > 1:
-                    for j in range(j0+1, j1):
-                        f = (j - j0) / span
-                        elevations[j] = v0 + f * (v1 - v0)
-            last_known = i
-
-    # se gli ultimi sono None, riempi con l'ultimo noto
-    if last_known is not None and last_known < len(elevations)-1:
-        for j in range(last_known+1, len(elevations)):
-            elevations[j] = elevations[last_known]
-
-    return elevations
-
-def elevation_gain_loss(elevations, min_step=1.0):
-    """
-    Ritorna (gain_m, loss_m). Scarta oscillazioni < min_step m.
-    """
-    if not elevations or len(elevations) < 2:
-        return (0, 0)
-    up = 0.0
-    down = 0.0
-    prev = elevations[0]
-    for e in elevations[1:]:
-        if e is None or prev is None:
-            prev = e if e is not None else prev
-            continue
-        diff = e - prev
-        if diff > min_step:
-            up += diff
-        elif diff < -min_step:
-            down -= diff  # diff è negativo
-        prev = e
-    return (int(round(up)), int(round(down)))
-
-# ---------- Misura overlap semplice ----------
-def overlap_score(coords, grid=1e-4):
-    """
-    Stima overlappo: quante volte ripassiamo su "celle" già viste (grid ~ 11m).
-    """
-    seen = {}
-    score = 0
-    for (lat, lon) in coords:
-        key = (round(lat / grid), round(lon / grid))
-        cnt = seen.get(key, 0)
-        score += 1 if cnt > 0 else 0
-        seen[key] = cnt + 1
-    return score
+        for j in range(i + min_sep, len(coords), step):
+            b = coords[j]
+            if haversine_km(a, b) * 1000.0 <= near_m:
+                near_count += 1
+    return near_count
 
 # ======================================
 # UI / MESSAGGI / PULSANTI
 # ======================================
 
 WELCOME = (
-    "🏍️ *Benvenuto nel MotoRoute Bot!*\n\n"
-    "Genera *GPX* (anche turn‑by‑turn), *KML* e un link *Google Maps*.\n\n"
+    "🏍️ *MotoRoute Bot*\n\n"
+    "Genera *GPX*, *KML* e un link *Google Maps*.\n\n"
     "1️⃣ Invia la *partenza* (posizione, `lat,lon` o indirizzo)\n"
     "2️⃣ Scegli *Round Trip* subito oppure imposta la *destinazione*\n"
     "3️⃣ (Opz.) aggiungi fino a *4 waypoint*, poi *Fine*\n"
     "4️⃣ Scegli *Standard* o *Curvy*\n\n"
-    "🔒 *Limiti*: 120 km totali · 80 km raggio per A→B · 4 waypoint\n"
-    "🛣️ *Profilo*: motorcycle (evita autostrade / fondi scarsi, predilige secondarie)"
+    "🔒 Limiti: 120 km totali · 80 km raggio per A→B · 4 waypoint.\n"
+    "🔁 Round Trip: *min 70 km – max 80 km*."
 )
 
 ASK_END = "Perfetto! Ora manda la *destinazione* (posizione, `lat,lon` o indirizzo)."
@@ -405,6 +303,7 @@ ASK_WAYPOINTS = (
     "Invia una posizione/indirizzo, oppure premi *Fine*."
 )
 ASK_STYLE_TEXT = "Seleziona lo *stile*:"
+ASK_DIR_TEXT = "Scegli la *direzione iniziale* del giro (orienta l'anello):"
 PROCESSING = "⏳ Sto calcolando il percorso…"
 INVALID_INPUT = "❌ Formato non valido. Invia posizione, `lat,lon` oppure un indirizzo."
 LIMITS_EXCEEDED = "⚠️ Supera i limiti della versione free. Riduci distanza/waypoint."
@@ -466,6 +365,28 @@ def waypoints_keyboard():
         ]
     }
 
+def direction_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "N",  "callback_data": "dir:N"},
+                {"text": "NE", "callback_data": "dir:NE"},
+                {"text": "E",  "callback_data": "dir:E"},
+                {"text": "SE", "callback_data": "dir:SE"},
+            ],
+            [
+                {"text": "S",  "callback_data": "dir:S"},
+                {"text": "SW", "callback_data": "dir:SW"},
+                {"text": "W",  "callback_data": "dir:W"},
+                {"text": "NW", "callback_data": "dir:NW"},
+            ],
+            [
+                {"text": "🤖 Auto", "callback_data": "dir:AUTO"},
+                {"text": "❌ Annulla", "callback_data": "action:cancel"}
+            ]
+        ]
+    }
+
 def admin_request_keyboard(uid:int, name:str):
     return {
         "inline_keyboard": [
@@ -483,7 +404,8 @@ def reset_state(uid):
         "end": None,
         "waypoints": [],
         "style": None,
-        "roundtrip": False
+        "roundtrip": False,
+        "initial_bearing": None  # gradi (0..359) o None per auto
     }
 
 # ======================================
@@ -507,18 +429,15 @@ def valhalla_route(locations, style="standard", roundtrip=False):
     if not VALHALLA_URL:
         raise RuntimeError("VALHALLA_URL non configurato.")
 
+    # Chiudi anello per roundtrip
     if roundtrip:
         start = locations[0]
         locations = locations + [{"lat": start["lat"], "lon": start["lon"]}]
 
     def build_payload_motorcycle(curvy_variant: int):
         """
-        curvy_variant:
-          0 -> standard motorcycle
-          1 -> curvy: use_highways=0.0
-          2 -> curvy: use_highways=0.0 + exclude_unpaved=true
-          3 -> curvy: use_highways=0.0 + avoid_bad_surfaces=true
-          4 -> curvy: use_highways=0.0 + exclude_unpaved=true + avoid_bad_surfaces=true
+        0 -> standard
+        1..4 -> varianti curvy (compatibili con istanze pubbliche)
         """
         co = {}
         if style == "curvy":
@@ -539,12 +458,11 @@ def valhalla_route(locations, style="standard", roundtrip=False):
         return body
 
     variants = [0] if style == "standard" else [4, 2, 3, 1]
-    urls_to_try = [VALHALLA_URL]
-    if VALHALLA_URL_FALLBACK and VALHALLA_URL_FALLBACK != VALHALLA_URL:
-        urls_to_try.append(VALHALLA_URL_FALLBACK)
+    urls_to_try = [VALHALLA_URL] + ([VALHALLA_URL_FALLBACK] if VALHALLA_URL_FALLBACK and VALHALLA_URL_FALLBACK != VALHALLA_URL else [])
 
     last_err = None
     resp_json = None
+
     for v in variants:
         payload = build_payload_motorcycle(v)
         for url in urls_to_try:
@@ -566,50 +484,129 @@ def valhalla_route(locations, style="standard", roundtrip=False):
     coords = []
     total_km = 0.0
     total_min = 0.0
-    maneuvers_out = []
+    all_maneuvers = []
 
     for leg in trip.get("legs", []):
         shape = leg.get("shape")
-        coords_leg = decode_polyline6(shape) if shape else []
-        # manovre
-        mans = leg.get("maneuvers", [])
-        for m in mans:
-            idx = m.get("begin_shape_index", 0)
-            if 0 <= idx < len(coords_leg):
-                lat, lon = coords_leg[idx]
-                maneuvers_out.append({
-                    "lat": lat,
-                    "lon": lon,
-                    "text": m.get("instruction", "")
-                })
-        # append coords e summary
-        coords.extend(coords_leg)
+        if shape:
+            coords.extend(decode_polyline6(shape))
         summary = leg.get("summary", {})
-        total_km += float(summary.get("length", 0.0))
-        total_min += float(summary.get("time", 0.0)) / 60.0
+        total_km += float(summary.get("length", 0.0))      # km
+        total_min += float(summary.get("time", 0.0)) / 60  # min
+        # maneuvers
+        mans = leg.get("maneuvers", [])
+        # Valhalla maniuvrs: length è in km; begin_shape_index per localizzazione
+        all_maneuvers.extend(mans)
 
-    return coords, round(total_km, 1), round(total_min, 1), maneuvers_out
+    return coords, round(total_km, 1), round(total_min, 1), all_maneuvers
 
-def compute_best_roundtrip(start_tuple, style, waypoints):
+# ---------- Round Trip planner (70–80 km, anti-overlap) ----------
+def plan_roundtrip_with_direction(start, user_wps, style, initial_bearing_deg=None):
     """
-    Per roundtrip senza waypoint, prova due seed e scegli quello con meno overlap.
+    Trova un roundtrip 70–80 km:
+    - Seleziona la distanza seed con ricerca adattiva (3..30 km)
+    - Prova angoli alternati per ridurre overlap
+    - Ritorna best (coords, dist_km, time_min, maneuvers)
     """
-    base = [{"lat": start_tuple[0], "lon": start_tuple[1]}]
-    # Variante 1
-    locs1 = add_roundtrip_seed_if_needed(base.copy(), d_km=5.0, variant=1)
-    coords1, dist1, time1, mans1 = valhalla_route(locs1, style=style, roundtrip=True)
-    score1 = overlap_score(coords1)
+    s_lat, s_lon = start
+    base_locs = [{"lat": s_lat, "lon": s_lon}]
+    for wp in user_wps:
+        base_locs.append({"lat": wp[0], "lon": wp[1]})
 
-    # Variante 2
-    base2 = [{"lat": start_tuple[0], "lon": start_tuple[1]}]
-    locs2 = add_roundtrip_seed_if_needed(base2.copy(), d_km=5.0, variant=2)
-    coords2, dist2, time2, mans2 = valhalla_route(locs2, style=style, roundtrip=True)
-    score2 = overlap_score(coords2)
-
-    if score1 <= score2:
-        return coords1, dist1, time1, mans1
+    # Se l'utente non ha scelto direzione, proviamo in auto (8 direzioni cardinali)
+    primary_dirs = []
+    if initial_bearing_deg is not None:
+        primary_dirs = [initial_bearing_deg]
     else:
-        return coords2, dist2, time2, mans2
+        primary_dirs = [0, 45, 90, 135, 180, 225, 270, 315]
+
+    # Ricerca su distanza seed
+    d_low, d_high = 3.0, 30.0
+    best = None  # (score_overlap, |dist-75|, coords, dist_km, time, mans)
+
+    # fare massimo N iterazioni sulla distanza
+    for _ in range(6):
+        d_try = (d_low + d_high) / 2.0
+
+        # su ogni distanza, proviamo angoli +/- {0,45,90} rispetto a ciascuna direzione principale
+        angle_offsets = [0, 45, -45, 90, -90]
+        candidates = []
+
+        for base_bearing in primary_dirs:
+            for ao in angle_offsets:
+                bearing = (base_bearing + ao) % 360
+                # costruisci locs = start + user_wps + seeds
+                locs = list(base_locs)
+                seeds = seeds_from_bearing(s_lat, s_lon, d_try, bearing)
+                locs.extend(seeds)
+                # controllo approssimativo prima della chiamata (veloce)
+                approx_km = approx_total_km_from_locs(locs + [{"lat": s_lat, "lon": s_lon}], roundtrip=False)
+                # filtro molto lasco per evitare chiamate inutili: nell'ordine giusto di grandezza
+                if approx_km < RT_MIN_KM * 0.5 or approx_km > RT_MAX_KM * 1.8:
+                    continue
+
+                try:
+                    coords, dist_km, time_min, mans = valhalla_route(locs, style=style, roundtrip=True)
+                except Exception:
+                    continue
+
+                # scarta se fuori range
+                if dist_km < RT_MIN_KM or dist_km > RT_MAX_KM:
+                    # aggiorna bounds per iterazioni successive
+                    if dist_km < RT_MIN_KM:
+                        d_low = max(d_low, d_try)
+                    else:
+                        d_high = min(d_high, d_try)
+                    continue
+
+                # calcola overlap score (più basso è meglio) e distanza da target
+                ov = overlap_score(coords)
+                delta = abs(dist_km - RT_TARGET_KM)
+                candidates.append((ov, delta, coords, dist_km, time_min, mans))
+
+        if candidates:
+            # seleziona migliore
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            best = candidates[0]
+            break
+        else:
+            # se nessun candidato nel range, ritenta con nuova distanza
+            # euristica: allarga un po' se d_low, d_high sono troppo vicini
+            if (d_high - d_low) < 1.0:
+                d_low = max(2.0, d_low - 1.0)
+                d_high = min(35.0, d_high + 1.0)
+            # sposta d_try secondo la logica precedente (già aggiornata nei tentativi)
+            # altrimenti, prova a forzare verso target medio
+            d_mid = (d_low + d_high) / 2.0
+            d_low = max(2.0, d_mid - 2.5)
+            d_high = min(35.0, d_mid + 2.5)
+
+    # se non si è trovato nulla nel range, prova una volta a prendere il più vicino alla banda 70–80
+    if not best:
+        # fallback: sceglirotta più vicina al target provando alcune distanze fisse
+        for d_try in [8, 10, 12, 15, 18, 20, 22]:
+            for base_bearing in primary_dirs:
+                for ao in [0, 45, -45]:
+                    bearing = (base_bearing + ao) % 360
+                    locs = list(base_locs)
+                    seeds = seeds_from_bearing(s_lat, s_lon, d_try, bearing)
+                    locs.extend(seeds)
+                    try:
+                        coords, dist_km, time_min, mans = valhalla_route(locs, style=style, roundtrip=True)
+                    except Exception:
+                        continue
+                    ov = overlap_score(coords)
+                    delta_to_band = 0 if RT_MIN_KM <= dist_km <= RT_MAX_KM else min(abs(dist_km-RT_MIN_KM), abs(dist_km-RT_MAX_KM))
+                    cand = (ov, delta_to_band, coords, dist_km, time_min, mans)
+                    if (best is None) or (cand < best):
+                        best = cand
+
+    if not best:
+        raise RuntimeError("Impossibile trovare un anello 70–80 km. Prova a cambiare zona/waypoint.")
+
+    # ritorna migliore
+    _, _, coords, dist_km, time_min, mans = best
+    return coords, dist_km, time_min, mans
 
 # ======================================
 # ROUTES
@@ -630,7 +627,7 @@ def healthz():
         authorized=len(AUTHORIZED)
     )
 
-# Webhook flessibile: /webhook/<token> con check del token
+# Webhook: /webhook/<token>
 @app.route("/webhook/<path:token>", methods=["POST"])
 def webhook(token):
     if token != os.environ.get("TELEGRAM_TOKEN"):
@@ -680,7 +677,7 @@ def webhook(token):
             send_message(chat_id, RESTARTED)
             return jsonify(ok=True)
 
-        # Access control
+        # Access control (owner/autorizzati)
         if uid != OWNER_ID and uid not in AUTHORIZED:
             if uid not in PENDING:
                 PENDING.add(uid)
@@ -705,15 +702,22 @@ def webhook(token):
         if data == "action:roundtrip_now":
             state["roundtrip"] = True
             state["end"] = None
-            state["phase"] = "waypoints"
-            send_message(
-                chat_id,
-                "Round Trip dalla partenza.\nAggiungi waypoint opzionali oppure premi *Fine*.",
-                reply_markup=waypoints_keyboard()
-            )
+            state["phase"] = "pick_direction"
+            send_message(chat_id, ASK_DIR_TEXT, reply_markup=direction_keyboard())
             return jsonify(ok=True)
 
-        # Fine waypoint (passa alla scelta stile)
+        # Direzione roundtrip
+        if data.startswith("dir:"):
+            val = data.split(":", 1)[1]
+            if val == "AUTO":
+                state["initial_bearing"] = None
+            else:
+                state["initial_bearing"] = BEARING_BY_DIR.get(val, None)
+            state["phase"] = "waypoints"
+            send_message(chat_id, "Ok! Ora puoi aggiungere *waypoint* oppure premere *Fine*.", reply_markup=waypoints_keyboard())
+            return jsonify(ok=True)
+
+        # Fine waypoint → stile
         if data == "action:finish_waypoints":
             state["phase"] = "style"
             send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
@@ -728,93 +732,89 @@ def webhook(token):
             if uid != OWNER_ID:
                 last = LAST_DOWNLOAD.get(uid, 0)
                 if now_epoch() - last < RATE_LIMIT_DAYS * 86400:
-                    when = epoch_to_str(last + RATE_LIMIT_DAYS * 86400)
+                    when = epoch_to_local(last + RATE_LIMIT_DAYS * 86400)
                     send_message(chat_id, RATE_LIMIT_MSG.format(when=when))
                     return jsonify(ok=True)
 
-            # Prepara locations
-            locs_base = [{"lat": state["start"][0], "lon": state["start"][1]}]
-            for wp in state["waypoints"]:
-                locs_base.append({"lat": wp[0], "lon": wp[1]})
+            start = state["start"]
+            wps = state["waypoints"]
 
-            # Pre-check limiti
             if is_roundtrip:
-                tmp = add_roundtrip_seed_if_needed(locs_base.copy(), 5.0, 1)
-                approx_km = approx_total_km_from_locs(tmp, roundtrip=True)
+                # Calcolo roundtrip 70–80 km con direzione
+                send_message(chat_id, PROCESSING)
+                try:
+                    coords, dist_km, time_min, mans = plan_roundtrip_with_direction(
+                        start=start,
+                        user_wps=wps,
+                        style=("curvy" if style == "curvy" else "standard"),
+                        initial_bearing_deg=state.get("initial_bearing")
+                    )
+                except Exception as e:
+                    send_message(chat_id, f"Errore routing (roundtrip):\n{str(e)[:250]}")
+                    return jsonify(ok=True)
+
+                # File
+                gpx_bytes = build_gpx_with_turns(coords, mans, "Round Trip Moto")
+                send_document(chat_id, gpx_bytes, "route.gpx",
+                              caption=f"Round Trip · Distanza: {dist_km} km · Durata: {time_min} min")
+
+                kml_bytes = build_kml(coords)
+                send_document(chat_id, kml_bytes, "route.kml")
+
+                # Link Google Maps (origin=start, destination=start, waypoints = solo i WP utente)
+                gmaps_url = build_gmaps_url(start, start, wps)
+                send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
+
+                LAST_DOWNLOAD[uid] = now_epoch()
+                reset_state(uid)
+                return jsonify(ok=True)
+
             else:
+                # A → B
                 if not state.get("end"):
                     send_message(chat_id, "⚠️ Devi impostare una destinazione prima di calcolare A→B.")
                     return jsonify(ok=True)
-                tmp = locs_base + [{"lat": state["end"][0], "lon": state["end"][1]}]
-                approx_km = approx_total_km_from_locs(tmp, roundtrip=False)
 
-            if approx_km > MAX_ROUTE_KM * 1.25:
-                send_message(chat_id, f"{LIMITS_EXCEEDED}\nStima: ~{round(approx_km,1)} km")
+                # Prepara locations
+                locs = [{"lat": start[0], "lon": start[1]}]
+                for wp in wps:
+                    locs.append({"lat": wp[0], "lon": wp[1]})
+                locs.append({"lat": state["end"][0], "lon": state["end"][1]})
+
+                send_message(chat_id, PROCESSING)
+                try:
+                    coords, dist_km, time_min, mans = valhalla_route(
+                        locs, style=("curvy" if style == "curvy" else "standard"), roundtrip=False
+                    )
+                except Exception as e:
+                    send_message(chat_id, f"Errore routing:\n{str(e)[:250]}")
+                    return jsonify(ok=True)
+
+                if dist_km > MAX_ROUTE_KM:
+                    send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
+                    return jsonify(ok=True)
+
+                if not coords or len(coords) < 2:
+                    send_message(chat_id, ROUTE_NOT_FOUND)
+                    return jsonify(ok=True)
+
+                gpx_bytes = build_gpx_with_turns(coords, mans, "Percorso Moto")
+                send_document(chat_id, gpx_bytes, "route.gpx",
+                              caption=f"Distanza: {dist_km} km · Durata: {time_min} min")
+
+                kml_bytes = build_kml(coords)
+                send_document(chat_id, kml_bytes, "route.kml")
+
+                gmaps_url = build_gmaps_url(start, state["end"], wps)
+                send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
+
+                LAST_DOWNLOAD[uid] = now_epoch()
+                reset_state(uid)
                 return jsonify(ok=True)
-
-            send_message(chat_id, PROCESSING)
-
-            # Calcolo percorso (con anti-overlap per roundtrip senza waypoint)
-            try:
-                if is_roundtrip and len(state["waypoints"]) == 0:
-                    coords, dist_km, time_min, maneuvers = compute_best_roundtrip(state["start"], style, state["waypoints"])
-                else:
-                    locs = locs_base.copy()
-                    if is_roundtrip:
-                        locs = add_roundtrip_seed_if_needed(locs, 5.0, 1)
-                        coords, dist_km, time_min, maneuvers = valhalla_route(locs, style=style, roundtrip=True)
-                    else:
-                        locs.append({"lat": state["end"][0], "lon": state["end"][1]})
-                        coords, dist_km, time_min, maneuvers = valhalla_route(locs, style=style, roundtrip=False)
-            except Exception as e:
-                send_message(chat_id, f"Errore routing:\n{str(e)[:250]}")
-                return jsonify(ok=True)
-
-            if dist_km > MAX_ROUTE_KM:
-                send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
-                return jsonify(ok=True)
-
-            if not coords or len(coords) < 2:
-                send_message(chat_id, ROUTE_NOT_FOUND)
-                return jsonify(ok=True)
-
-            # ===== Altimetria: resample 50m + fetch + gain/loss =====
-            coords50 = resample_path(coords, ELEV_SAMPLE_M)
-            ele = None
-            gain_m = loss_m = 0
-            try:
-                ele = fetch_elevations_batched(coords50)
-                gain_m, loss_m = elevation_gain_loss(ele)
-            except Exception:
-                ele = None
-
-            # File GPX con elevazioni (se disponibili) + route turn-by-turn
-            gpx_bytes = build_gpx(coords50, "Percorso Moto", elevations=ele, maneuvers=maneuvers)
-            cap = f"Distanza: {dist_km} km · Durata: {time_min} min"
-            if ele:
-                cap += f" · ↑{gain_m} m / ↓{loss_m} m"
-            send_document(chat_id, gpx_bytes, "route.gpx", caption=cap)
-
-            # KML solo polilinea (niente ele)
-            kml_bytes = build_kml(coords)
-            send_document(chat_id, kml_bytes, "route.kml")
-
-            # Link Google Maps
-            if is_roundtrip:
-                gmaps_url = build_gmaps_url(state["start"], state["start"], state["waypoints"])
-            else:
-                gmaps_url = build_gmaps_url(state["start"], state["end"], state["waypoints"])
-            send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
-
-            # Aggiorna rate-limit
-            LAST_DOWNLOAD[uid] = now_epoch()
-
-            reset_state(uid)
-            return jsonify(ok=True)
 
         return jsonify(ok=True)
 
-    # ---------- MESSAGGI ----------
+    # ---------- MESSAGGI TESTUALI ----------
     msg = update.get("message")
     if not msg:
         return jsonify(ok=True)
@@ -828,7 +828,7 @@ def webhook(token):
         reset_state(uid)
     state = USER_STATE[uid]
 
-    # Comandi globali
+    # /start
     if text.lower() == "/start":
         reset_state(uid)
         if uid != OWNER_ID and uid not in AUTHORIZED:
@@ -849,6 +849,7 @@ def webhook(token):
         send_message(chat_id, WELCOME)
         return jsonify(ok=True)
 
+    # Annulla / Ricomincia
     if text.lower() == "annulla":
         reset_state(uid)
         send_message(chat_id, CANCELLED)
@@ -866,12 +867,13 @@ def webhook(token):
 
     phase = state["phase"]
 
-    # START
+    # START → ricevi partenza
     if phase == "start":
         loc = parse_location_from_message(msg)
         if not loc:
             send_message(chat_id, INVALID_INPUT)
             return jsonify(ok=True)
+
         state["start"] = loc
         state["phase"] = "choose_route_type"
         send_message(
@@ -881,15 +883,17 @@ def webhook(token):
         )
         return jsonify(ok=True)
 
-    # END
+    # END → ricevi destinazione
     if phase == "end":
         loc = parse_location_from_message(msg)
         if not loc:
             send_message(chat_id, INVALID_INPUT)
             return jsonify(ok=True)
+
         if haversine_km(state["start"], loc) > MAX_RADIUS_KM:
             send_message(chat_id, "⚠️ La destinazione è oltre *80 km* in linea d’aria dalla partenza.")
             return jsonify(ok=True)
+
         state["end"] = loc
         state["phase"] = "waypoints"
         send_message(chat_id, ASK_WAYPOINTS, reply_markup=waypoints_keyboard())
@@ -930,84 +934,80 @@ def webhook(token):
         if uid != OWNER_ID:
             last = LAST_DOWNLOAD.get(uid, 0)
             if now_epoch() - last < RATE_LIMIT_DAYS * 86400:
-                when = epoch_to_str(last + RATE_LIMIT_DAYS * 86400)
+                when = epoch_to_local(last + RATE_LIMIT_DAYS * 86400)
                 send_message(chat_id, RATE_LIMIT_MSG.format(when=when))
                 return jsonify(ok=True)
 
-        style = "curvy" if text.lower() == "curvy" else "standard"
         is_roundtrip = bool(state.get("roundtrip"))
-
-        locs_base = [{"lat": state["start"][0], "lon": state["start"][1]}]
-        for wp in state["waypoints"]:
-            locs_base.append({"lat": wp[0], "lon": wp[1]})
+        start = state["start"]
+        wps = state["waypoints"]
 
         if is_roundtrip:
-            tmp = add_roundtrip_seed_if_needed(locs_base.copy(), 5.0, 1)
-            approx_km = approx_total_km_from_locs(tmp, roundtrip=True)
+            send_message(chat_id, PROCESSING)
+            try:
+                coords, dist_km, time_min, mans = plan_roundtrip_with_direction(
+                    start=start,
+                    user_wps=wps,
+                    style=("curvy" if text.lower() == "curvy" else "standard"),
+                    initial_bearing_deg=state.get("initial_bearing")
+                )
+            except Exception as e:
+                send_message(chat_id, f"Errore routing (roundtrip):\n{str(e)[:250]}")
+                return jsonify(ok=True)
+
+            gpx_bytes = build_gpx_with_turns(coords, mans, "Round Trip Moto")
+            send_document(chat_id, gpx_bytes, "route.gpx",
+                          caption=f"Round Trip · Distanza: {dist_km} km · Durata: {time_min} min")
+
+            kml_bytes = build_kml(coords)
+            send_document(chat_id, kml_bytes, "route.kml")
+
+            gmaps_url = build_gmaps_url(start, start, wps)
+            send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
+
+            LAST_DOWNLOAD[uid] = now_epoch()
+            reset_state(uid)
+            return jsonify(ok=True)
         else:
             if not state.get("end"):
                 send_message(chat_id, "⚠️ Devi impostare una destinazione prima di calcolare A→B.")
                 return jsonify(ok=True)
-            tmp = locs_base + [{"lat": state["end"][0], "lon": state["end"][1]}]
-            approx_km = approx_total_km_from_locs(tmp, roundtrip=False)
 
-        if approx_km > MAX_ROUTE_KM * 1.25:
-            send_message(chat_id, f"{LIMITS_EXCEEDED}\nStima: ~{round(approx_km,1)} km")
+            locs = [{"lat": start[0], "lon": start[1]}]
+            for wp in wps:
+                locs.append({"lat": wp[0], "lon": wp[1]})
+            locs.append({"lat": state["end"][0], "lon": state["end"][1]})
+
+            send_message(chat_id, PROCESSING)
+            try:
+                coords, dist_km, time_min, mans = valhalla_route(
+                    locs, style=("curvy" if text.lower() == "curvy" else "standard"), roundtrip=False
+                )
+            except Exception as e:
+                send_message(chat_id, f"Errore routing:\n{str(e)[:250]}")
+                return jsonify(ok=True)
+
+            if dist_km > MAX_ROUTE_KM:
+                send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
+                return jsonify(ok=True)
+
+            if not coords or len(coords) < 2:
+                send_message(chat_id, ROUTE_NOT_FOUND)
+                return jsonify(ok=True)
+
+            gpx_bytes = build_gpx_with_turns(coords, mans, "Percorso Moto")
+            send_document(chat_id, gpx_bytes, "route.gpx",
+                          caption=f"Distanza: {dist_km} km · Durata: {time_min} min")
+
+            kml_bytes = build_kml(coords)
+            send_document(chat_id, kml_bytes, "route.kml")
+
+            gmaps_url = build_gmaps_url(start, state["end"], wps)
+            send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
+
+            LAST_DOWNLOAD[uid] = now_epoch()
+            reset_state(uid)
             return jsonify(ok=True)
-
-        send_message(chat_id, PROCESSING)
-
-        try:
-            if is_roundtrip and len(state["waypoints"]) == 0:
-                coords, dist_km, time_min, maneuvers = compute_best_roundtrip(state["start"], style, state["waypoints"])
-            else:
-                locs = locs_base.copy()
-                if is_roundtrip:
-                    locs = add_roundtrip_seed_if_needed(locs, 5.0, 1)
-                    coords, dist_km, time_min, maneuvers = valhalla_route(locs, style=style, roundtrip=True)
-                else:
-                    locs.append({"lat": state["end"][0], "lon": state["end"][1]})
-                    coords, dist_km, time_min, maneuvers = valhalla_route(locs, style=style, roundtrip=False)
-        except Exception as e:
-            send_message(chat_id, f"Errore routing:\n{str(e)[:250]}")
-            return jsonify(ok=True)
-
-        if dist_km > MAX_ROUTE_KM:
-            send_message(chat_id, f"{LIMITS_EXCEEDED}\nPercorso: {dist_km} km")
-            return jsonify(ok=True)
-
-        if not coords or len(coords) < 2:
-            send_message(chat_id, ROUTE_NOT_FOUND)
-            return jsonify(ok=True)
-
-        # Altimetria
-        coords50 = resample_path(coords, ELEV_SAMPLE_M)
-        ele = None
-        gain_m = loss_m = 0
-        try:
-            ele = fetch_elevations_batched(coords50)
-            gain_m, loss_m = elevation_gain_loss(ele)
-        except Exception:
-            ele = None
-
-        gpx_bytes = build_gpx(coords50, "Percorso Moto", elevations=ele, maneuvers=maneuvers)
-        cap = f"Distanza: {dist_km} km · Durata: {time_min} min"
-        if ele:
-            cap += f" · ↑{gain_m} m / ↓{loss_m} m"
-        send_document(chat_id, gpx_bytes, "route.gpx", caption=cap)
-
-        kml_bytes = build_kml(coords)
-        send_document(chat_id, kml_bytes, "route.kml")
-
-        if is_roundtrip:
-            gmaps_url = build_gmaps_url(state["start"], state["start"], state["waypoints"])
-        else:
-            gmaps_url = build_gmaps_url(state["start"], state["end"], state["waypoints"])
-        send_message(chat_id, f"🔗 *Apri in Google Maps:*\n{gmaps_url}")
-
-        LAST_DOWNLOAD[uid] = now_epoch()
-        reset_state(uid)
-        return jsonify(ok=True)
 
     send_message(chat_id, "❓ Usa /start per cominciare.")
     return jsonify(ok=True)
