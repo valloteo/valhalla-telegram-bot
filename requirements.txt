@@ -1,0 +1,4 @@
+flask==3.0.3
+requests==2.32.3
+gpxpy==1.6.2
+gunicorn==21.2.0
