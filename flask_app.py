@@ -10,7 +10,6 @@ import requests
 import gpxpy
 import gpxpy.gpx
 from io import BytesIO
-from PIL import Image, ImageDraw
 
 # ======================================
 # CONFIG
@@ -28,11 +27,6 @@ MAX_RADIUS_KM = 80              # solo A→B raggio
 RT_TARGET_MIN = 70              # round trip minimo
 RT_TARGET_MAX = 80              # round trip massimo
 RATE_LIMIT_DAYS = 7             # 1 download/sett (owner escluso)
-
-# PNG MAP CONFIG
-PNG_SIZE = 800
-OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-DEFAULT_ZOOM = 12  # zoom di base
 
 app = Flask(__name__)
 
@@ -152,7 +146,7 @@ def parse_location_from_message(msg):
         loc = msg["location"]
         return (loc["latitude"], loc["longitude"])
 
-    # 2) Testo come indirizzo (niente più parsing coordinate)
+    # 2) Testo come indirizzo
     text = (msg.get("text") or "").strip()
     if not text:
         return None
@@ -496,97 +490,63 @@ def valhalla_route(locations, style="standard", roundtrip=False):
     return coords, round(total_km, 1), round(total_min, 1), maneuvers_out
 
 # ======================================
-# PNG MAP GENERATION (OSM CARTO)
+# STATIC MAP (OSM) – NIENTE PILLOW
 # ======================================
 
-def latlon_to_tile(lat, lon, z):
-    lat_rad = radians(lat)
-    n = 2.0 ** z
-    xtile = int((lon + 180.0) / 360.0 * n)
-    ytile = int((1.0 - (log(tan(lat_rad) + 1/cos(lat_rad)) / pi)) / 2.0 * n)
-    return xtile, ytile
-
-def tile_to_pixel(lat, lon, z, xtile0, ytile0, tiles_x, tiles_y, img_size):
-    lat_rad = radians(lat)
-    n = 2.0 ** z
-    x = (lon + 180.0) / 360.0 * n
-    y = (1.0 - (log(tan(lat_rad) + 1/cos(lat_rad)) / pi)) / 2.0 * n
-
-    dx = (x - xtile0) * 256
-    dy = (y - ytile0) * 256
-
-    scale_x = img_size / (tiles_x * 256)
-    scale_y = img_size / (tiles_y * 256)
-
-    px = int(dx * scale_x)
-    py = int(dy * scale_y)
-    return px, py
-
-def build_png_map(coords, start, end, waypoints):
+def build_static_map_url(coords, start, end, waypoints):
+    """
+    Genera una URL per staticmap.openstreetmap.de con:
+    - percorso (path)
+    - marker start (verde)
+    - marker end (rosso)
+    - marker waypoint (gialli)
+    """
     if not coords:
         return None
 
-    lats = [c[0] for c in coords]
-    lons = [c[1] for c in coords]
-    min_lat, max_lat = min(lats), max(lats)
-    min_lon, max_lon = min(lons), max(lons)
+    mid = coords[len(coords)//2]
+    center_lat, center_lon = mid[0], mid[1]
 
-    lat_pad = (max_lat - min_lat) * 0.2 or 0.01
-    lon_pad = (max_lon - min_lon) * 0.2 or 0.01
-    min_lat -= lat_pad
-    max_lat += lat_pad
-    min_lon -= lon_pad
-    max_lon += lon_pad
+    zoom = 12
+    size = "800x800"
 
-    z = DEFAULT_ZOOM
-
-    xt_min, yt_max = latlon_to_tile(min_lat, min_lon, z)
-    xt_max, yt_min = latlon_to_tile(max_lat, max_lon, z)
-
-    tiles_x = max(1, xt_max - xt_min + 1)
-    tiles_y = max(1, yt_max - yt_min + 1)
-
-    base_img = Image.new("RGB", (tiles_x * 256, tiles_y * 256), (255, 255, 255))
-    for x in range(xt_min, xt_min + tiles_x):
-        for y in range(yt_min, yt_min + tiles_y):
-            url = OSM_TILE_URL.format(z=z, x=x, y=y)
-            try:
-                r = requests.get(url, timeout=5)
-                if r.status_code == 200:
-                    tile = Image.open(BytesIO(r.content)).convert("RGB")
-                    base_img.paste(tile, ((x - xt_min) * 256, (y - yt_min) * 256))
-            except:
-                pass
-
-    base_img = base_img.resize((PNG_SIZE, PNG_SIZE), Image.LANCZOS)
-    draw = ImageDraw.Draw(base_img)
-
-    pts = []
+    path = "weight:3|color:red"
     for lat, lon in coords:
-        px, py = tile_to_pixel(lat, lon, z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
-        pts.append((px, py))
-    if len(pts) >= 2:
-        draw.line(pts, fill=(255, 0, 0), width=4)
+        path += f"|{lat},{lon}"
+
+    markers = []
 
     if start:
-        sx, sy = tile_to_pixel(start[0], start[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
-        r = 6
-        draw.ellipse((sx-r, sy-r, sx+r, sy+r), fill=(0, 200, 0), outline=(0, 0, 0))
+        markers.append(f"color:green|{start[0]},{start[1]}")
 
     if end:
-        ex, ey = tile_to_pixel(end[0], end[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
-        r = 6
-        draw.ellipse((ex-r, ey-r, ex+r, ey+r), fill=(200, 0, 0), outline=(0, 0, 0))
+        markers.append(f"color:red|{end[0]},{end[1]}")
 
     for w in waypoints or []:
-        wx, wy = tile_to_pixel(w[0], w[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
-        r = 5
-        draw.ellipse((wx-r, wy-r, wx+r, wy+r), fill=(255, 215, 0), outline=(0, 0, 0))
+        markers.append(f"color:yellow|{w[0]},{w[1]}")
 
-    buf = BytesIO()
-    base_img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf.read()
+    markers_param = "&".join([f"markers={m}" for m in markers]) if markers else ""
+
+    url = (
+        "https://staticmap.openstreetmap.de/staticmap.php?"
+        f"center={center_lat},{center_lon}"
+        f"&zoom={zoom}"
+        f"&size={size}"
+        f"&path={path}"
+    )
+    if markers_param:
+        url += f"&{markers_param}"
+
+    return url
+
+def download_static_map(url):
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            return r.content
+    except:
+        pass
+    return None
 
 # ======================================
 # ROUTES
@@ -654,7 +614,7 @@ def webhook(token):
             send_message(chat_id, RESTARTED)
             return jsonify(ok=True)
 
-        # Access control (oltre annulla/ricomincia)
+        # Access control
         if uid != OWNER_ID and uid not in AUTHORIZED:
             if uid not in PENDING:
                 PENDING.add(uid)
@@ -707,7 +667,7 @@ def webhook(token):
             send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
             return jsonify(ok=True)
 
-        # Scelta stile (solo standard/curvy)
+        # Scelta stile
         if data.startswith("style:"):
             style = data.split(":", 1)[1]  # standard | curvy
             is_roundtrip = bool(state.get("roundtrip"))
@@ -797,19 +757,23 @@ def webhook(token):
                 send_message(chat_id, ROUTE_NOT_FOUND)
                 return jsonify(ok=True)
 
-            # PNG MAP
-            png_bytes = build_png_map(
+            # MAPPA STATIC OSM (senza Pillow)
+            map_url = build_static_map_url(
                 coords,
                 start=state["start"],
                 end=(state["end"] if not is_roundtrip else state["start"]),
                 waypoints=state["waypoints"]
             )
+            png_bytes = download_static_map(map_url) if map_url else None
+
             if png_bytes:
                 send_photo(
                     chat_id,
                     png_bytes,
                     caption=f"🗺️ Anteprima percorso\nDistanza stimata: {dist_km} km · Durata: {time_min} min"
                 )
+            else:
+                send_message(chat_id, "⚠️ Non sono riuscito a generare la mappa, ma i GPX sono pronti.")
 
             # GPX con turn-by-turn
             gpx_bytes = build_gpx_with_turns(coords, maneuvers, "Percorso Moto")
