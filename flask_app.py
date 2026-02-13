@@ -207,7 +207,7 @@ def decode_polyline6(polyline_str):
         lng += changes["lng"]
         coords.append((lat / 1e6, lng / 1e6))
     return coords
-# ======================================
+    # ======================================
 # MESSAGGI E UI (PULSANTI)
 # ======================================
 
@@ -286,7 +286,7 @@ def reset_state(uid):
         "waypoints": [],
         "style": None
     }
-# ======================================
+    # ======================================
 # FUNZIONE DI ROUTING CON VALHALLA
 # ======================================
 
@@ -341,6 +341,7 @@ def valhalla_route(locations, style="standard", roundtrip=False):
         total_min += float(summary.get("time", 0.0)) / 60  # minuti
 
     return coords, round(total_km, 1), round(total_min, 1)
+
 
 # ======================================
 # WEBHOOK TELEGRAM (cuore del bot)
@@ -597,7 +598,7 @@ def webhook(token):
     # Caso imprevisto
     send_message(chat_id, "❓ Usa /start per cominciare.")
     return jsonify(ok=True)
-# ======================================
+    # ======================================
 # ROUTE DI SERVIZIO (HOME / HEALTH)
 # ======================================
 
@@ -608,4 +609,3 @@ def home():
 @app.route("/healthz", methods=["GET"])
 def healthz():
     return jsonify(status="ok", valhalla=bool(VALHALLA_URL), max_wp=MAX_WAYPOINTS)
-
