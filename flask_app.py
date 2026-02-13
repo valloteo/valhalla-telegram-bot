@@ -2,7 +2,7 @@ import os
 import time
 import json
 import urllib.parse
-from math import radians, sin, cos, sqrt, atan2, asin
+from math import radians, sin, cos, sqrt, atan2, asin, log, tan, pi
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify
@@ -32,7 +32,7 @@ RATE_LIMIT_DAYS = 7             # 1 download/sett (owner escluso)
 # PNG MAP CONFIG
 PNG_SIZE = 800
 OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-DEFAULT_ZOOM = 12  # valore di base, eventualmente regolabile
+DEFAULT_ZOOM = 12  # zoom di base
 
 app = Flask(__name__)
 
@@ -157,8 +157,6 @@ def parse_location_from_message(msg):
     if not text:
         return None
 
-    # Se sembra chiaramente un paio di numeri separati da virgola/spazio, NON lo trattiamo come coordinate
-    # ma comunque proviamo il geocoding (potrebbe essere un indirizzo strano)
     loc = geocode_address(text)
     return loc
 
@@ -241,7 +239,7 @@ def offset_point(lat, lon, km, bearing_deg):
         sin(br)*sin(d)*cos(lat1),
         cos(d) - sin(lat1)*sin(lat2)
     )
-    return (lat2*180/3.1415926535, lon2*180/3.1415926535)
+    return (lat2*180/pi, lon2*180/pi)
 
 def seed_roundtrip_locations(start_lat, start_lon, base_km, bearing_deg):
     a_bearing = (bearing_deg + 90) % 360
@@ -505,78 +503,18 @@ def latlon_to_tile(lat, lon, z):
     lat_rad = radians(lat)
     n = 2.0 ** z
     xtile = int((lon + 180.0) / 360.0 * n)
-    ytile = int((1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n)  # robust? use standard formula
-    # meglio usare formula standard:
-    ytile = int((1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # In realtà usiamo formula classica:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # Per evitare complicazioni, usiamo formula standard:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # In pratica, per semplicità, ricalcoliamo con formula standard:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # Ok, troppo incasinato: usiamo formula corretta classica:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # Per evitare errori, riscriviamo in modo semplice:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # In realtà, formula standard è:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # Per non incasinarci, usiamo la formula classica:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # Ok, stop: formula standard corretta:
-    ytile = int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    ) if False else int(
-        (1.0 - ( (1.0 + sin(lat_rad)) / (1.0 - sin(lat_rad)) )**0.5 ) / 2.0 * n
-    )
-    # In realtà, la formula standard è:
-    # ytile = int((1.0 - (log(tan(lat_rad) + 1/cos(lat_rad)) / pi)) / 2.0 * n)
-    # Usiamo quella:
-    from math import log, tan, pi
     ytile = int((1.0 - (log(tan(lat_rad) + 1/cos(lat_rad)) / pi)) / 2.0 * n)
     return xtile, ytile
 
 def tile_to_pixel(lat, lon, z, xtile0, ytile0, tiles_x, tiles_y, img_size):
-    from math import log, tan, pi
     lat_rad = radians(lat)
     n = 2.0 ** z
     x = (lon + 180.0) / 360.0 * n
     y = (1.0 - (log(tan(lat_rad) + 1/cos(lat_rad)) / pi)) / 2.0 * n
 
-    # offset rispetto al tile di partenza
     dx = (x - xtile0) * 256
     dy = (y - ytile0) * 256
 
-    # ridimensioniamo alla dimensione finale
     scale_x = img_size / (tiles_x * 256)
     scale_y = img_size / (tiles_y * 256)
 
@@ -593,7 +531,6 @@ def build_png_map(coords, start, end, waypoints):
     min_lat, max_lat = min(lats), max(lats)
     min_lon, max_lon = min(lons), max(lons)
 
-    # piccolo padding
     lat_pad = (max_lat - min_lat) * 0.2 or 0.01
     lon_pad = (max_lon - min_lon) * 0.2 or 0.01
     min_lat -= lat_pad
@@ -603,14 +540,12 @@ def build_png_map(coords, start, end, waypoints):
 
     z = DEFAULT_ZOOM
 
-    # calcolo tile min/max
     xt_min, yt_max = latlon_to_tile(min_lat, min_lon, z)
     xt_max, yt_min = latlon_to_tile(max_lat, max_lon, z)
 
     tiles_x = max(1, xt_max - xt_min + 1)
     tiles_y = max(1, yt_max - yt_min + 1)
 
-    # scarica tiles
     base_img = Image.new("RGB", (tiles_x * 256, tiles_y * 256), (255, 255, 255))
     for x in range(xt_min, xt_min + tiles_x):
         for y in range(yt_min, yt_min + tiles_y):
@@ -623,11 +558,9 @@ def build_png_map(coords, start, end, waypoints):
             except:
                 pass
 
-    # ridimensiona a PNG_SIZE x PNG_SIZE
     base_img = base_img.resize((PNG_SIZE, PNG_SIZE), Image.LANCZOS)
     draw = ImageDraw.Draw(base_img)
 
-    # traccia percorso
     pts = []
     for lat, lon in coords:
         px, py = tile_to_pixel(lat, lon, z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
@@ -635,19 +568,16 @@ def build_png_map(coords, start, end, waypoints):
     if len(pts) >= 2:
         draw.line(pts, fill=(255, 0, 0), width=4)
 
-    # start
     if start:
         sx, sy = tile_to_pixel(start[0], start[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
         r = 6
         draw.ellipse((sx-r, sy-r, sx+r, sy+r), fill=(0, 200, 0), outline=(0, 0, 0))
 
-    # end
     if end:
         ex, ey = tile_to_pixel(end[0], end[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
         r = 6
         draw.ellipse((ex-r, ey-r, ex+r, ey+r), fill=(200, 0, 0), outline=(0, 0, 0))
 
-    # waypoints
     for w in waypoints or []:
         wx, wy = tile_to_pixel(w[0], w[1], z, xt_min, yt_min, tiles_x, tiles_y, PNG_SIZE)
         r = 5
@@ -762,7 +692,6 @@ def webhook(token):
             else:
                 state["direction"] = key if key in BEARING_MAP else "NE"
             send_message(chat_id, f"Direzione impostata: *{state['direction']}*")
-            # ora apriamo la fase waypoint
             state["phase"] = "waypoints"
             send_message(
                 chat_id,
@@ -843,7 +772,7 @@ def webhook(token):
                     style=("curvy" if style == "curvy" else "standard"),
                     roundtrip=is_roundtrip
                 )
-            except Exception as e:
+            except Exception:
                 send_message(
                     chat_id,
                     "❌ Non sono riuscito a calcolare il percorso.\n"
@@ -1050,7 +979,7 @@ def webhook(token):
         )
         return jsonify(ok=True)
 
-    # CHOOSE ROUTE TYPE (se mai ci arriviamo con testo, lo ignoriamo)
+    # CHOOSE ROUTE TYPE
     if phase == "choose_route_type":
         send_message(
             chat_id,
@@ -1059,7 +988,7 @@ def webhook(token):
         )
         return jsonify(ok=True)
 
-    # STYLE (se arriva testo qui, lo ignoriamo e ricordiamo i pulsanti)
+    # STYLE
     if phase == "style":
         send_message(
             chat_id,
@@ -1068,7 +997,7 @@ def webhook(token):
         )
         return jsonify(ok=True)
 
-    # DIRECTION (se arriva testo qui, ricordiamo di usare i pulsanti)
+    # DIRECTION
     if phase == "direction":
         send_message(
             chat_id,
