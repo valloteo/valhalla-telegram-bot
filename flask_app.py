@@ -19,6 +19,9 @@ VALHALLA_URL_FALLBACK = os.environ.get("VALHALLA_URL_FALLBACK", "").rstrip("/")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 AUTH_USERS_CSV = os.environ.get("AUTH_USERS_CSV", "").strip()
 
+# Nuovo provider mappe
+STADIA_TOKEN = os.environ.get("STADIA_TOKEN")  # <-- NON mettere la chiave nel codice
+
 MAX_WAYPOINTS = 4
 MAX_ROUTE_KM = 120
 MAX_RADIUS_KM = 80
@@ -208,57 +211,36 @@ def decode_polyline6(polyline_str):
         coords.append((lat / 1e6, lng / 1e6))
     return coords
 # ======================================
-# UI / MESSAGGI / PULSANTI
+# MESSAGGI STANDARD
 # ======================================
 
 WELCOME = (
-    "🏍️ *Benvenuto nel MotoRoute Bot!*\n\n"
-    "Genera *GPX (turn-by-turn)*, un *GPX semplice* e una *mappa PNG*.\n\n"
-    "1️⃣ Invia la *partenza*\n"
-    "2️⃣ Scegli *Round Trip* o *Destinazione*\n"
-    "3️⃣ (Opz.) aggiungi fino a *4 waypoint*\n"
-    "4️⃣ Scegli lo *stile*\n\n"
-    "🔒 Limiti: 120 km totali · 80 km raggio · RT 70–80 km"
+    "🏍 *Benvenuto nel MotoRoute Bot!*\n\n"
+    "Invia la *partenza* (posizione o indirizzo)."
 )
 
-ASK_END = "Perfetto! Ora manda la *destinazione*."
-ASK_WAYPOINTS = "Vuoi aggiungere waypoint? Invia posizione/indirizzo oppure premi *Fine*."
-ASK_STYLE_TEXT = "Scegli lo *stile* del percorso:"
-ASK_DIRECTION = "Scegli una *direzione iniziale* per l'anello (opzionale)."
-PROCESSING = "⏳ Sto calcolando il percorso…"
-INVALID_INPUT = "❌ Non riesco a capire questo indirizzo/posizione."
-LIMITS_EXCEEDED = "⚠️ Supera i limiti. Riduci distanza/waypoint."
-ROUTE_NOT_FOUND = "❌ Nessun percorso trovato."
-CANCELLED = "🛑 Operazione annullata."
+ASK_END = "📍 Ora invia la *destinazione*."
+ASK_WAYPOINTS = "➕ Aggiungi waypoint opzionali oppure premi *Fine*."
+ASK_DIRECTION = "🧭 Scegli la direzione preferita per il Round Trip."
+ASK_STYLE_TEXT = "🎨 Scegli lo stile del percorso."
+PROCESSING = "⏳ Sto calcolando il percorso..."
+INVALID_INPUT = "⚠️ Non ho capito. Invia una posizione o un indirizzo valido."
+CANCELLED = "❌ Operazione annullata."
 RESTARTED = "🔄 Ricominciamo! Invia la *partenza*."
-NOT_AUTH = "🔒 Accesso riservato. Ho inviato la tua richiesta all’owner."
-ACCESS_GRANTED = "✅ Sei stato abilitato!"
-ACCESS_DENIED = "❌ La tua richiesta è stata rifiutata."
-RATE_LIMIT_MSG = "⏱️ Limite 1 download/settimana. Riprova dopo: *{when}*."
+NOT_AUTH = "🔒 Non sei autorizzato. Ho inviato la richiesta all’admin."
+ACCESS_GRANTED = "✅ Accesso approvato! Ora puoi usare il bot."
+ACCESS_DENIED = "❌ La tua richiesta di accesso è stata rifiutata."
+LIMITS_EXCEEDED = "🚫 Il percorso supera i limiti consentiti."
 
-def style_inline_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "🛣️ Standard", "callback_data": "style:standard"}],
-            [
-                {"text": "🌀 Curvy leggero", "callback_data": "style:curvy_light"},
-                {"text": "🌀🌀 Curvy", "callback_data": "style:curvy"}
-            ],
-            [{"text": "🌀🌀🌀 Super Curvy (Premium)", "callback_data": "style:super_curvy"}],
-            [
-                {"text": "❌ Annulla", "callback_data": "action:cancel"},
-                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
-            ]
-        ]
-    }
+# ======================================
+# TASTIERE
+# ======================================
 
 def start_options_keyboard():
     return {
         "inline_keyboard": [
-            [
-                {"text": "🔄 Round Trip", "callback_data": "action:roundtrip_now"},
-                {"text": "➡️ Destinazione", "callback_data": "action:set_end"}
-            ],
+            [{"text": "Imposta destinazione", "callback_data": "action:set_end"}],
+            [{"text": "Round Trip", "callback_data": "action:roundtrip_now"}],
             [{"text": "❌ Annulla", "callback_data": "action:cancel"}]
         ]
     }
@@ -266,11 +248,9 @@ def start_options_keyboard():
 def waypoints_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "✅ Fine", "callback_data": "action:finish_waypoints"}],
-            [
-                {"text": "❌ Annulla", "callback_data": "action:cancel"},
-                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
-            ]
+            [{"text": "➕ Aggiungi waypoint", "callback_data": "action:add_wp"}],
+            [{"text": "✔️ Fine", "callback_data": "action:finish_waypoints"}],
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}]
         ]
     }
 
@@ -278,43 +258,46 @@ def direction_keyboard():
     return {
         "inline_keyboard": [
             [
-                {"text": "⬆️ N", "callback_data": "dir:N"},
-                {"text": "↗️ NE", "callback_data": "dir:NE"},
-                {"text": "➡️ E", "callback_data": "dir:E"},
-                {"text": "↘️ SE", "callback_data": "dir:SE"},
+                {"text": "Nord", "callback_data": "dir:N"},
+                {"text": "Est", "callback_data": "dir:E"},
+                {"text": "Sud", "callback_data": "dir:S"},
+                {"text": "Ovest", "callback_data": "dir:W"},
             ],
+            [{"text": "Lascia decidere al bot", "callback_data": "dir:skip"}],
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}]
+        ]
+    }
+
+def style_inline_keyboard():
+    return {
+        "inline_keyboard": [
             [
-                {"text": "⬇️ S", "callback_data": "dir:S"},
-                {"text": "↙️ SW", "callback_data": "dir:SW"},
-                {"text": "⬅️ W", "callback_data": "dir:W"},
-                {"text": "↖️ NW", "callback_data": "dir:NW"},
+                {"text": "Normale", "callback_data": "style:normal"},
+                {"text": "Curvy", "callback_data": "style:curvy"},
+                {"text": "Super Curvy ⭐", "callback_data": "style:super_curvy"},
             ],
-            [{"text": "⏭️ Salta (NE)", "callback_data": "dir:skip"}]
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}]
         ]
     }
 
 def cancel_restart_keyboard():
     return {
         "inline_keyboard": [
-            [
-                {"text": "❌ Annulla", "callback_data": "action:cancel"},
-                {"text": "🔄 Ricomincia", "callback_data": "action:restart"}
-            ]
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}],
+            [{"text": "🔄 Ricomincia", "callback_data": "action:restart"}]
         ]
     }
 
-def admin_request_keyboard(uid:int, name:str):
+def admin_request_keyboard(uid, uname):
     return {
         "inline_keyboard": [
-            [
-                {"text": f"✅ Approva {name} ({uid})", "callback_data": f"admin:approve:{uid}"},
-                {"text": "❌ Rifiuta", "callback_data": f"admin:deny:{uid}"}
-            ]
+            [{"text": f"✔️ Approva {uname}", "callback_data": f"admin:approve:{uid}"}],
+            [{"text": f"❌ Rifiuta {uname}", "callback_data": f"admin:deny:{uid}"}]
         ]
     }
 
 # ======================================
-# RESET STATE
+# RESET STATO
 # ======================================
 
 def reset_state(uid):
@@ -323,612 +306,495 @@ def reset_state(uid):
         "start": None,
         "end": None,
         "waypoints": [],
-        "style": None,
         "roundtrip": False,
-        "direction": None
+        "direction": None,
+        "style": None,
     }
 
 # ======================================
-# ROUND TRIP LOGIC (NUOVA VERSIONE)
+# ROUND TRIP — GENERAZIONE WAYPOINT AUTOMATICI
 # ======================================
 
-import random
+def generate_roundtrip_waypoints(start, direction, count=3, radius_km=25):
+    lat, lon = start["lat"], start["lon"]
 
-BEARING_MAP = {
-    "N": 0, "NE": 45, "E": 90, "SE": 135,
-    "S": 180, "SW": 225, "W": 270, "NW": 315
-}
+    # Direzioni cardinali
+    dirs = {
+        "N": 0,
+        "E": 90,
+        "S": 180,
+        "W": 270,
+        "NE": 45,
+    }
 
-def offset_point(lat, lon, km, bearing_deg):
-    R = 6371.0
-    br = radians(bearing_deg)
-    lat1 = radians(lat); lon1 = radians(lon)
-    d = km / R
-    lat2 = asin(sin(lat1)*cos(d) + cos(lat1)*sin(d)*cos(br))
-    lon2 = lon1 + atan2(
-        sin(br)*sin(d)*cos(lat1),
-        cos(d) - sin(lat1)*sin(lat2)
-    )
-    return (lat2*180/pi, lon2*180/pi)
+    if direction not in dirs:
+        direction = "NE"
 
-def seed_roundtrip_locations(start_lat, start_lon, base_km, bearing_deg):
-    """
-    3 waypoint:
-    - wp1: direzione scelta (forte)
-    - wp2: deviazione random (destra o sinistra)
-    - wp3: deviazione opposta più corta
-    """
-    wp1 = offset_point(start_lat, start_lon, base_km, bearing_deg)
-
-    deviation = random.choice([-35, 35])
-
-    wp2 = offset_point(start_lat, start_lon, base_km * 0.85, (bearing_deg + deviation) % 360)
-    wp3 = offset_point(start_lat, start_lon, base_km * 0.65, (bearing_deg - deviation/2) % 360)
-
-    return [
-        {"lat": wp1[0], "lon": wp1[1]},
-        {"lat": wp2[0], "lon": wp2[1]},
-        {"lat": wp3[0], "lon": wp3[1]},
+    base_angle = dirs[direction]
+    angles = [
+        base_angle - 40,
+        base_angle,
+        base_angle + 40
     ]
 
-def tune_roundtrip_length(start_lat, start_lon, waypoints, desired_min=RT_TARGET_MIN, desired_max=RT_TARGET_MAX, bearing_deg=45):
-    """
-    Adatta la lunghezza dell'anello scegliendo il base_km migliore.
-    Compatibile con i 3 waypoint.
-    """
-    base_candidates = [18, 20, 22, 24, 26]
+    wps = []
+    for ang in angles[:count]:
+        ang_rad = ang * pi / 180
+        d = radius_km / 6371.0
 
-    best = None
-    for base in base_candidates:
-        locs = [{"lat": start_lat, "lon": start_lon}]
+        lat2 = asin(sin(radians(lat)) * cos(d) +
+                    cos(radians(lat)) * sin(d) * cos(ang_rad))
+        lon2 = radians(lon) + atan2(
+            sin(ang_rad) * sin(d) * cos(radians(lat)),
+            cos(d) - sin(radians(lat)) * sin(lat2)
+        )
 
-        if waypoints:
-            locs += [{"lat": w[0], "lon": w[1]} for w in waypoints]
-        else:
-            locs += seed_roundtrip_locations(start_lat, start_lon, base, bearing_deg)
+        wps.append({
+            "lat": lat2 * 180 / pi,
+            "lon": lon2 * 180 / pi
+        })
 
-        approx = approx_total_km_from_locs(locs, roundtrip=True)
-
-        score = 1000 if desired_min <= approx <= desired_max else -abs((desired_min + desired_max)/2 - approx)
-
-        if best is None or score > best[0]:
-            best = (score, base, locs, approx)
-
-        if desired_min <= approx <= desired_max:
-            break
-
-    _, used_base, best_locs, approx_km = best
-    return best_locs, used_base, approx_km
+    return wps
 # ======================================
-# VALHALLA COSTING
+# VALHALLA — CHIAMATE API
 # ======================================
 
-def post_valhalla(url, payload, timeout=30, retries=1):
-    """Invia richiesta a Valhalla con retry."""
-    last_err = None
-    for _ in range(retries + 1):
-        try:
-            r = requests.post(f"{url}/route", json=payload, timeout=timeout)
-            if r.ok:
-                return r.json()
-            last_err = f"{r.status_code} {r.text[:200]}"
-        except Exception as e:
-            last_err = str(e)
-        time.sleep(0.4)
-    raise RuntimeError(last_err or "Errore Valhalla")
+def post_valhalla(url, payload):
+    try:
+        r = requests.post(url, json=payload, timeout=25)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except:
+        return None
 
-def build_motorcycle_costing(style, is_owner):
-    """Restituisce i parametri di costing per i vari livelli di curvatura."""
+def route_valhalla(locations, style="normal"):
+    costing = "motorcycle"
 
-    # STANDARD (per tutti)
-    if style == "standard":
-        return {
-            "use_highways": 0.5,
-            "use_primary": 0.8,
-            "use_secondary": 1.0,
-            "use_tertiary": 1.0,
-            "use_curves": 0.0,
-            "use_hills": 0.0,
-            "exclude_unpaved": True,
-            "avoid_bad_surfaces": True
-        }
-
-    # CURVY LEGGERO (per tutti)
-    if style == "curvy_light":
-        return {
-            "use_highways": 0.0,
-            "use_primary": 0.4,
-            "use_secondary": 0.9,
-            "use_tertiary": 1.1,
-            "use_curves": 0.6,
-            "use_hills": 0.4,
-            "exclude_unpaved": True,
-            "avoid_bad_surfaces": True
-        }
-
-    # CURVY (solo owner)
+    # Stili personalizzati
     if style == "curvy":
-        if not is_owner:
-            return None
-        return {
-            "use_highways": 0.0,
-            "use_primary": 0.2,
-            "use_secondary": 1.0,
-            "use_tertiary": 1.3,
-            "use_curves": 1.4,
-            "use_hills": 0.8,
-            "exclude_unpaved": True,
-            "avoid_bad_surfaces": True
-        }
-
-    # SUPER CURVY (solo owner)
-    if style == "super_curvy":
-        if not is_owner:
-            return None
-        return {
-            "use_highways": 0.0,
-            "use_primary": 0.1,
-            "use_secondary": 0.8,
-            "use_tertiary": 1.5,
-            "use_living_streets": 1.6,
-            "use_curves": 2.2,
-            "use_hills": 1.2,
-            "exclude_unpaved": True,
-            "avoid_bad_surfaces": True
-        }
-
-    return None
-
-# ======================================
-# VALHALLA ROUTING
-# ======================================
-
-def valhalla_route(locations, style="standard", roundtrip=False, is_owner=False):
-    """Invia richiesta a Valhalla e decodifica percorso, distanza, tempo e manovre."""
-    if not VALHALLA_URL:
-        raise RuntimeError("VALHALLA_URL non configurato.")
-
-    locs = list(locations)
-
-    # Chiudi anello se roundtrip
-    if roundtrip:
-        s = locs[0]
-        locs.append({"lat": s["lat"], "lon": s["lon"]})
-
-    costing_opts = build_motorcycle_costing(style, is_owner)
-    if costing_opts is None:
-        raise PermissionError("premium_blocked")
+        costing_options = {"use_hills": 0.6, "use_trails": 0.4, "use_highways": 0.1}
+    elif style == "super_curvy":
+        costing_options = {"use_hills": 1.0, "use_trails": 0.8, "use_highways": 0.0}
+    else:
+        costing_options = {"use_hills": 0.3, "use_trails": 0.2, "use_highways": 0.5}
 
     payload = {
-        "locations": locs,
-        "costing": "motorcycle",
-        "costing_options": {"motorcycle": costing_opts},
+        "locations": locations,
+        "costing": costing,
+        "costing_options": {costing: costing_options},
         "directions_options": {"units": "kilometers"},
     }
 
     urls_to_try = [VALHALLA_URL]
-    if VALHALLA_URL_FALLBACK and VALHALLA_URL_FALLBACK != VALHALLA_URL:
+    if VALHALLA_URL_FALLBACK:
         urls_to_try.append(VALHALLA_URL_FALLBACK)
 
-    resp_json = None
-    last_err = None
+    for u in urls_to_try:
+        data = post_valhalla(f"{u}/route", payload)
+        if data:
+            return data
 
-    for url in urls_to_try:
-        try:
-            j = post_valhalla(url, payload, timeout=30, retries=1)
-            if "trip" in j:
-                resp_json = j
-                break
-            last_err = json.dumps(j)[:200]
-        except Exception as e:
-            last_err = str(e)
-
-    if not resp_json:
-        raise RuntimeError(f"Valhalla error: {last_err}")
-
-    trip = resp_json.get("trip", {})
-    coords = []
-    total_km = 0.0
-    total_min = 0.0
-    maneuvers_out = []
-
-    for leg in trip.get("legs", []):
-        shape = leg.get("shape")
-        if shape:
-            coords.extend(decode_polyline6(shape))
-
-        summary = leg.get("summary", {})
-        total_km += float(summary.get("length", 0.0))
-        total_min += float(summary.get("time", 0.0)) / 60.0
-
-        for m in leg.get("maneuvers", []):
-            instr = m.get("instruction", "")
-            idx = m.get("begin_shape_index", 0)
-            if 0 <= idx < len(coords):
-                lat, lon = coords[idx]
-                maneuvers_out.append({
-                    "instruction": instr,
-                    "lat": lat,
-                    "lon": lon
-                })
-
-    return coords, round(total_km, 1), round(total_min, 1), maneuvers_out
+    return None
 
 # ======================================
-# STATIC MAP (OSM)
+# PNG — STADIA MAPS + FALLBACK OSM
 # ======================================
 
-def simplify_coords(coords, max_points=80):
-    """Riduce numero punti per evitare URL troppo lunghe."""
-    if len(coords) <= max_points:
-        return coords
-    step = max(1, len(coords) // max_points)
-    return [coords[i] for i in range(0, len(coords), step)]
-
-def build_static_map_url(coords, start, end, waypoints):
-    """Costruisce URL static map OSM."""
-    if not coords:
+def build_stadia_url(coords, markers):
+    """
+    coords = lista di (lat, lon) del percorso
+    markers = lista di (lat, lon) per start/end/waypoints
+    """
+    if not STADIA_TOKEN:
         return None
 
-    mid = coords[len(coords)//2]
-    center_lat, center_lon = mid[0], mid[1]
+    # Linea del percorso
+    path = "|".join([f"{lat},{lon}" for lat, lon in coords])
 
-    zoom = 12
-    size = "800x800"
-
-    path = "weight:3|color:red"
-    for lat, lon in coords:
-        path += f"|{lat},{lon}"
-
-    markers = []
-    if start:
-        markers.append(f"color:green|{start[0]},{start[1]}")
-    if end:
-        markers.append(f"color:red|{end[0]},{end[1]}")
-    for w in waypoints or []:
-        markers.append(f"color:yellow|{w[0]},{w[1]}")
-
-    markers_param = "&".join([f"markers={m}" for m in markers]) if markers else ""
+    # Marker
+    mk = "|".join([f"{lat},{lon}" for lat, lon in markers])
 
     url = (
-        "https://staticmap.openstreetmap.de/staticmap.php?"
-        f"center={center_lat},{center_lon}"
-        f"&zoom={zoom}"
-        f"&size={size}"
-        f"&path={path}"
+        "https://tiles.stadiamaps.com/static?"
+        f"api_key={STADIA_TOKEN}"
+        f"&path=color:red|weight:3|{path}"
+        f"&markers=color:blue|{mk}"
+        "&zoom=12"
+        "&size=800x800"
     )
-    if markers_param:
-        url += f"&{markers_param}"
-
     return url
 
-def download_static_map(url):
-    """Scarica PNG della mappa."""
+def build_osm_url(coords, markers):
+    """
+    Fallback OSM static map
+    """
+    base = "https://staticmap.openstreetmap.de/staticmap.php"
+    path = "|".join([f"{lat},{lon}" for lat, lon in coords])
+    mk = "|".join([f"{lat},{lon}" for lat, lon in markers])
+
+    url = (
+        f"{base}?size=800x800"
+        f"&path=color:red|weight:3|{path}"
+        f"&markers={mk}"
+    )
+    return url
+
+def download_png(url):
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=20)
         if r.status_code == 200:
             return r.content
+        return None
     except:
-        pass
-    return None
+        return None
+
+def build_static_map(coords, markers):
+    """
+    1) Prova Stadia Maps
+    2) Se fallisce → OSM
+    """
+    # 1) Stadia
+    if STADIA_TOKEN:
+        url = build_stadia_url(coords, markers)
+        if url:
+            img = download_png(url)
+            if img:
+                return img
+
+    # 2) Fallback OSM
+    url = build_osm_url(coords, markers)
+    return download_png(url)
+
 # ======================================
-# CALCOLO PERCORSO E INVIO RISULTATI
+# ESTRARRE COORDINATE E MANOVRE DA VALHALLA
 # ======================================
 
-def compute_route_and_send(uid, chat_id):
-    """Legge lo stato utente, calcola il percorso, invia PNG + GPX, applica rate limit."""
-    state = USER_STATE.get(uid)
-    if not state:
-        send_message(chat_id, "❌ Stato utente non trovato. Ricomincia con /start.")
-        return
+def extract_coords_and_maneuvers(valhalla_json):
+    if not valhalla_json:
+        return None, None
 
-    style = state.get("style")
-    is_owner = (uid == OWNER_ID)
+    try:
+        shape = valhalla_json["trip"]["legs"][0]["shape"]
+        coords = decode_polyline6(shape)
 
-    start = state.get("start")
-    end = state.get("end")
-    wps = state.get("waypoints", [])
-    roundtrip = state.get("roundtrip", False)
+        maneuvers = []
+        for m in valhalla_json["trip"]["legs"][0]["maneuvers"]:
+            lat = m.get("begin_shape_index")
+            if lat is None:
+                continue
+            idx = m["begin_shape_index"]
+            if idx < len(coords):
+                maneuvers.append({
+                    "lat": coords[idx][0],
+                    "lon": coords[idx][1],
+                    "instruction": m.get("instruction", "")
+                })
 
-    if not start:
-        send_message(chat_id, "❌ Partenza mancante. Ricomincia con /start.")
-        return
+        return coords, maneuvers
 
-    # --- Build locations ---
+    except:
+        return None, None
+# ======================================
+# RATE LIMIT (solo utenti normali)
+# ======================================
+
+def check_rate_limit(uid):
+    if uid == OWNER_ID:
+        return True  # Owner illimitato
+
+    last = LAST_DOWNLOAD.get(uid)
+    if not last:
+        return True
+
+    now = now_epoch()
+    if (now - last) >= RATE_LIMIT_DAYS * 86400:
+        return True
+
+    return False
+
+def update_rate_limit(uid):
+    LAST_DOWNLOAD[uid] = now_epoch()
+
+# ======================================
+# COSTRUZIONE LOCATIONS PER VALHALLA
+# ======================================
+
+def build_locations(start, end, waypoints, roundtrip):
+    locs = []
+
+    # Start
+    locs.append({"lat": start["lat"], "lon": start["lon"]})
+
+    # Waypoints
+    for w in waypoints:
+        locs.append({"lat": w["lat"], "lon": w["lon"]})
+
+    # End
+    if end:
+        locs.append({"lat": end["lat"], "lon": end["lon"]})
+
+    # Round trip → ritorno al punto di partenza
     if roundtrip:
-        locs = [{"lat": start[0], "lon": start[1]}]
+        locs.append({"lat": start["lat"], "lon": start["lon"]})
 
-        # Waypoint manuali dell’utente
-        for w in wps:
-            locs.append({"lat": w[0], "lon": w[1]})
+    return locs
 
-        # Direzione scelta
-        bearing = BEARING_MAP.get(state.get("direction") or "NE", 45)
+# ======================================
+# CONTROLLO LIMITI KM
+# ======================================
 
-        # Generazione automatica dei waypoint dell’anello
-        locs, used_base, approx_km = tune_roundtrip_length(
-            start[0], start[1],
-            wps,
-            desired_min=RT_TARGET_MIN,
-            desired_max=RT_TARGET_MAX,
-            bearing_deg=bearing
+def check_distance_limits(locs, roundtrip):
+    approx = approx_total_km_from_locs(locs, roundtrip)
+    return approx <= MAX_ROUTE_KM
+
+# ======================================
+# CALCOLO PERCORSO COMPLETO
+# ======================================
+
+def compute_and_send_route(uid, chat_id):
+    st = USER_STATE.get(uid)
+    if not st:
+        send_message(chat_id, "Errore interno. Riparti con /start.")
+        return
+
+    start = st["start"]
+    end = st["end"]
+    wps = st["waypoints"]
+    roundtrip = st["roundtrip"]
+    direction = st["direction"]
+    style = st["style"]
+
+    # Se round trip → genera waypoint automatici
+    if roundtrip and not wps:
+        wps = generate_roundtrip_waypoints(start, direction, count=3, radius_km=25)
+
+    # Costruisci locations
+    locs = build_locations(start, end, wps, roundtrip)
+
+    # Controllo limiti km (valido anche per te)
+    if not check_distance_limits(locs, roundtrip):
+        send_message(chat_id, LIMITS_EXCEEDED)
+        return
+
+    # Rate limit (solo utenti normali)
+    if not check_rate_limit(uid):
+        last = LAST_DOWNLOAD.get(uid)
+        send_message(
+            chat_id,
+            f"⏳ Hai già scaricato un percorso di recente.\n"
+            f"Puoi riprovare dopo: *{epoch_to_str(last + RATE_LIMIT_DAYS*86400)}*"
         )
+        return
 
+    send_message(chat_id, PROCESSING)
+
+    # Chiamata Valhalla
+    val = route_valhalla(locs, style=style)
+    if not val:
+        send_message(chat_id, "❌ Errore Valhalla. Riprova più tardi.")
+        return
+
+    coords, maneuvers = extract_coords_and_maneuvers(val)
+    if not coords:
+        send_message(chat_id, "❌ Errore nel percorso.")
+        return
+
+    # GPX
+    gpx_bytes = build_gpx_with_turns(coords, maneuvers)
+
+    # PNG (Stadia + fallback OSM)
+    markers = [(start["lat"], start["lon"])]
+    for w in wps:
+        markers.append((w["lat"], w["lon"]))
+    if end:
+        markers.append((end["lat"], end["lon"]))
+
+    png_bytes = build_static_map(coords, markers)
+
+    # Aggiorna rate limit
+    update_rate_limit(uid)
+
+    # Invio GPX
+    send_document(chat_id, gpx_bytes, "route.gpx", caption="📄 GPX pronto!")
+
+    # Invio PNG
+    if png_bytes:
+        send_photo(chat_id, png_bytes, caption="🗺 Mappa del percorso")
     else:
-        if not end:
-            send_message(chat_id, "❌ Destinazione mancante. Ricomincia con /start.")
+        send_message(chat_id, "⚠️ PNG non disponibile (OSM e Stadia non rispondono).")
+
+    # Reset stato
+    reset_state(uid)
+# ======================================
+# CALLBACK QUERY HANDLER
+# ======================================
+
+def handle_callback(uid, chat_id, cq_id, data):
+    st = USER_STATE.get(uid)
+
+    # Admin actions
+    if data.startswith("admin:"):
+        _, action, target = data.split(":")
+        target = int(target)
+
+        if uid != OWNER_ID:
+            answer_callback_query(cq_id, "Non autorizzato.")
             return
 
-        locs = [{"lat": start[0], "lon": start[1]}]
-        for w in wps:
-            locs.append({"lat": w[0], "lon": w[1]})
-        locs.append({"lat": end[0], "lon": end[1]})
+        if action == "approve":
+            AUTHORIZED.add(target)
+            if target in PENDING:
+                PENDING.remove(target)
+            send_message(target, ACCESS_GRANTED)
+            answer_callback_query(cq_id, "Utente approvato.")
+        else:
+            if target in PENDING:
+                PENDING.remove(target)
+            send_message(target, ACCESS_DENIED)
+            answer_callback_query(cq_id, "Utente rifiutato.")
+        return
 
-    # --- Limits ---
-    approx = approx_total_km_from_locs(locs, roundtrip)
-    if approx > MAX_ROUTE_KM:
-        send_message(chat_id, LIMITS_EXCEEDED)
+    # Normal user actions
+    if data == "action:cancel":
         reset_state(uid)
+        send_message(chat_id, CANCELLED)
         return
 
-    # --- Route calculation ---
-    try:
-        coords, total_km, total_min, maneuvers = valhalla_route(
-            locs,
-            style=style,
-            roundtrip=roundtrip,
-            is_owner=is_owner
-        )
-    except PermissionError:
-        send_message(chat_id, "🔒 *Funzione Premium riservata all’owner.*")
-        return
-    except Exception:
-        send_message(chat_id, ROUTE_NOT_FOUND)
+    if data == "action:restart":
         reset_state(uid)
+        send_message(chat_id, RESTARTED)
         return
 
-    # --- PNG ---
-    coords_simplified = simplify_coords(coords, max_points=80)
-    map_url = build_static_map_url(
-        coords_simplified,
-        start=start,
-        end=(start if roundtrip else end),
-        waypoints=wps
-    )
-    png_bytes = download_static_map(map_url) if map_url else None
+    if data == "action:set_end":
+        st["phase"] = "await_end"
+        send_message(chat_id, ASK_END)
+        return
 
-    # --- GPX ---
-    gpx_turns = build_gpx_with_turns(coords, maneuvers)
-    gpx_simple = build_gpx_simple(coords)
+    if data == "action:add_wp":
+        st["phase"] = "await_wp"
+        send_message(chat_id, "📍 Invia il waypoint.")
+        return
 
-    # --- Rate limit ---
-    last = LAST_DOWNLOAD.get(uid, 0)
-    now = now_epoch()
-    if uid != OWNER_ID and (now - last) < RATE_LIMIT_DAYS * 86400:
-        when = epoch_to_str(last + RATE_LIMIT_DAYS * 86400)
-        send_message(chat_id, RATE_LIMIT_MSG.format(when=when))
+    if data == "action:finish_waypoints":
+        st["phase"] = "choose_style"
+        send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
+        return
+
+    if data == "action:roundtrip_now":
+        st["roundtrip"] = True
+        st["phase"] = "choose_direction"
+        send_message(chat_id, ASK_DIRECTION, reply_markup=direction_keyboard())
+        return
+
+    # Direzione round trip
+    if data.startswith("dir:"):
+        direction = data.split(":")[1]
+        st["direction"] = direction
+        st["phase"] = "choose_style"
+        send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
+        return
+
+    # Stile percorso
+    if data.startswith("style:"):
+        style = data.split(":")[1]
+
+        # Owner può usare super_curvy
+        if style == "super_curvy" and uid != OWNER_ID:
+            answer_callback_query(cq_id, "Solo l’admin può usare Super Curvy.")
+            return
+
+        st["style"] = style
+        answer_callback_query(cq_id, "Stile selezionato!")
+        compute_and_send_route(uid, chat_id)
+        return
+
+    answer_callback_query(cq_id, "Comando non riconosciuto.")
+
+
+# ======================================
+# MESSAGE HANDLER
+# ======================================
+
+def handle_message(uid, chat_id, msg):
+    # Controllo accesso
+    if uid not in AUTHORIZED:
+        if uid not in PENDING:
+            PENDING.add(uid)
+            send_message(
+                OWNER_ID,
+                f"🔔 Richiesta accesso da {uid}",
+                reply_markup=admin_request_keyboard(uid, f"user_{uid}")
+            )
+        send_message(chat_id, NOT_AUTH)
+        return
+
+    st = USER_STATE.get(uid)
+    if not st:
         reset_state(uid)
+        st = USER_STATE[uid]
+
+    phase = st["phase"]
+    loc = parse_location_from_message(msg)
+
+    if phase == "start":
+        if not loc:
+            send_message(chat_id, INVALID_INPUT)
+            return
+        st["start"] = {"lat": loc[0], "lon": loc[1]}
+        st["phase"] = "await_end"
+        send_message(chat_id, ASK_END)
         return
 
-    LAST_DOWNLOAD[uid] = now
+    if phase == "await_end":
+        if not loc:
+            send_message(chat_id, INVALID_INPUT)
+            return
+        st["end"] = {"lat": loc[0], "lon": loc[1]}
+        st["phase"] = "waypoints"
+        send_message(chat_id, ASK_WAYPOINTS, reply_markup=waypoints_keyboard())
+        return
 
-    # --- Send PNG ---
-    if png_bytes:
-        send_photo(chat_id, png_bytes, caption="🗺️ *Mappa del percorso*")
+    if phase == "await_wp":
+        if not loc:
+            send_message(chat_id, INVALID_INPUT)
+            return
+        if len(st["waypoints"]) >= MAX_WAYPOINTS:
+            send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS} waypoint.")
+            return
+        st["waypoints"].append({"lat": loc[0], "lon": loc[1]})
+        st["phase"] = "waypoints"
+        send_message(chat_id, ASK_WAYPOINTS, reply_markup=waypoints_keyboard())
+        return
 
-    # --- Send GPX ---
-    send_document(chat_id, gpx_turns, "percorso_turns.gpx", caption="📍 GPX con istruzioni")
-    send_document(chat_id, gpx_simple, "percorso_simple.gpx", caption="📍 GPX semplice")
+    send_message(chat_id, INVALID_INPUT)
 
-    # --- Summary ---
-    send_message(
-        chat_id,
-        f"🏁 *Percorso generato!*\n\n"
-        f"📏 *Distanza:* {total_km} km\n"
-        f"⏱️ *Tempo stimato:* {total_min} min\n"
-        f"🌀 *Stile:* {style.replace('_', ' ')}\n"
-        f"📍 *Round Trip:* {'Sì' if roundtrip else 'No'}"
-    )
 
-    reset_state(uid)
 # ======================================
 # WEBHOOK
 # ======================================
 
-@app.route("/webhook/<path:token>", methods=["POST"])
-def webhook(token):
-    if token != TOKEN:
-        return jsonify(ok=False, error="forbidden"), 403
+@app.route("/", methods=["POST"])
+def webhook():
+    data = request.get_json()
 
-    update = request.get_json(silent=True) or {}
-
-    # ---------------------------------------------------------
-    # CALLBACK QUERY
-    # ---------------------------------------------------------
-    if "callback_query" in update:
-        cq = update["callback_query"]
-        data = cq.get("data", "")
-        chat_id = cq["message"]["chat"]["id"]
+    if "callback_query" in data:
+        cq = data["callback_query"]
         uid = cq["from"]["id"]
-        uname = cq["from"].get("first_name", "Utente")
+        chat_id = cq["message"]["chat"]["id"]
+        cq_id = cq["id"]
+        handle_callback(uid, chat_id, cq_id, cq["data"])
+        return jsonify({"ok": True})
 
-        answer_callback_query(cq["id"])
-
-        if uid not in USER_STATE:
-            reset_state(uid)
-        state = USER_STATE[uid]
-
-        # --- Admin approval ---
-        if data.startswith("admin:"):
-            if uid != OWNER_ID:
-                return jsonify(ok=True)
-            parts = data.split(":")
-            if len(parts) == 3 and parts[1] in ("approve", "deny") and parts[2].isdigit():
-                target = int(parts[2])
-                if parts[1] == "approve":
-                    AUTHORIZED.add(target)
-                    PENDING.discard(target)
-                    send_message(target, ACCESS_GRANTED)
-                    send_message(chat_id, f"✅ Autorizzato: {target}")
-                else:
-                    PENDING.discard(target)
-                    send_message(target, ACCESS_DENIED)
-                    send_message(chat_id, f"🚫 Rifiutato: {target}")
-            return jsonify(ok=True)
-
-        # --- Cancel / Restart ---
-        if data == "action:cancel":
-            reset_state(uid)
-            send_message(chat_id, CANCELLED)
-            return jsonify(ok=True)
-
-        if data == "action:restart":
-            reset_state(uid)
-            send_message(chat_id, RESTARTED)
-            return jsonify(ok=True)
-
-        # --- Access control ---
-        if uid != OWNER_ID and uid not in AUTHORIZED:
-            if uid not in PENDING:
-                PENDING.add(uid)
-                send_message(
-                    OWNER_ID,
-                    f"📩 Richiesta accesso da {uname} (id `{uid}`)",
-                    reply_markup=admin_request_keyboard(uid, uname)
-                )
-            send_message(chat_id, NOT_AUTH)
-            return jsonify(ok=True)
-
-        # --- Set destination ---
-        if data == "action:set_end":
-            state["roundtrip"] = False
-            state["phase"] = "end"
-            send_message(chat_id, ASK_END, reply_markup=cancel_restart_keyboard())
-            return jsonify(ok=True)
-
-        # --- Round Trip ---
-        if data == "action:roundtrip_now":
-            state["roundtrip"] = True
-            state["end"] = None
-            state["phase"] = "direction"
-            state["direction"] = None
-            send_message(chat_id, ASK_DIRECTION, reply_markup=direction_keyboard())
-            return jsonify(ok=True)
-
-        # --- Direction for roundtrip ---
-        if data.startswith("dir:"):
-            key = data.split(":", 1)[1]
-            state["direction"] = "NE" if key == "skip" else key
-            send_message(chat_id, f"Direzione impostata: *{state['direction']}*")
-            state["phase"] = "waypoints"
-            send_message(
-                chat_id,
-                "Round Trip dalla partenza.\nAggiungi waypoint opzionali oppure premi *Fine*.",
-                reply_markup=waypoints_keyboard()
-            )
-            return jsonify(ok=True)
-
-        # --- Finish waypoints ---
-        if data == "action:finish_waypoints":
-            state["phase"] = "style"
-            send_message(chat_id, ASK_STYLE_TEXT, reply_markup=style_inline_keyboard())
-            return jsonify(ok=True)
-
-        # --- Style selection ---
-        if data.startswith("style:"):
-            style = data.split(":", 1)[1]
-
-            if style in ("curvy", "super_curvy") and uid != OWNER_ID:
-                send_message(chat_id, "🔒 *Funzione Premium riservata all’owner.*")
-                return jsonify(ok=True)
-
-            state["style"] = style
-            state["phase"] = "style_selected"
-            send_message(chat_id, PROCESSING)
-
-            # Calcolo immediato del percorso
-            compute_route_and_send(uid, chat_id)
-            return jsonify(ok=True)
-
-        return jsonify(ok=True)
-
-    # ---------------------------------------------------------
-    # MESSAGGI NORMALI
-    # ---------------------------------------------------------
-    if "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
+    if "message" in data:
+        msg = data["message"]
         uid = msg["from"]["id"]
-        uname = msg["from"].get("first_name", "Utente")
+        chat_id = msg["chat"]["id"]
+        handle_message(uid, chat_id, msg)
+        return jsonify({"ok": True})
 
-        if uid not in USER_STATE:
-            reset_state(uid)
-        state = USER_STATE[uid]
+    return jsonify({"ok": True})
 
-        # --- Access control ---
-        if uid != OWNER_ID and uid not in AUTHORIZED:
-            if uid not in PENDING:
-                PENDING.add(uid)
-                send_message(
-                    OWNER_ID,
-                    f"📩 Richiesta accesso da {uname} (id `{uid}`)",
-                    reply_markup=admin_request_keyboard(uid, uname)
-                )
-            send_message(chat_id, NOT_AUTH)
-            return jsonify(ok=True)
-
-        text = msg.get("text", "")
-
-        # --- /start ---
-        if text == "/start":
-            reset_state(uid)
-            send_message(chat_id, WELCOME)
-            return jsonify(ok=True)
-
-        # --- /cancel ---
-        if text == "/cancel":
-            reset_state(uid)
-            send_message(chat_id, CANCELLED)
-            return jsonify(ok=True)
-
-        # --- Phase: start ---
-        if state["phase"] == "start":
-            loc = parse_location_from_message(msg)
-            if not loc:
-                send_message(chat_id, INVALID_INPUT)
-                return jsonify(ok=True)
-            state["start"] = loc
-            state["phase"] = "choose_mode"
-            send_message(chat_id, "Partenza impostata!", reply_markup=start_options_keyboard())
-            return jsonify(ok=True)
-
-        # --- Phase: end ---
-        if state["phase"] == "end":
-            loc = parse_location_from_message(msg)
-            if not loc:
-                send_message(chat_id, INVALID_INPUT)
-                return jsonify(ok=True)
-            state["end"] = loc
-            state["phase"] = "waypoints"
-            send_message(chat_id, ASK_WAYPOINTS, reply_markup=waypoints_keyboard())
-            return jsonify(ok=True)
-
-        # --- Phase: waypoints ---
-        if state["phase"] == "waypoints":
-            if len(state["waypoints"]) >= MAX_WAYPOINTS:
-                send_message(chat_id, f"⚠️ Hai già {MAX_WAYPOINTS} waypoint. Premi *Fine*.")
-                return jsonify(ok=True)
-
-            loc = parse_location_from_message(msg)
-            if not loc:
-                send_message(chat_id, INVALID_INPUT)
-                return jsonify(ok=True)
-
-            state["waypoints"].append(loc)
-            send_message(chat_id, f"Waypoint aggiunto! ({len(state['waypoints'])}/{MAX_WAYPOINTS})")
-            return jsonify(ok=True)
-
-    return jsonify(ok=True)
 
 # ======================================
 # AVVIO FLASK
