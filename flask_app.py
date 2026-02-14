@@ -729,6 +729,15 @@ def handle_message(uid, chat_id, msg):
         send_message(chat_id, NOT_AUTH)
         return
 
+    text = (msg.get("text") or "").strip()
+
+    # 👉 GESTIONE /start (mancava!)
+    if text == "/start":
+        reset_state(uid)
+        send_message(chat_id, WELCOME, reply_markup=start_options_keyboard())
+        return
+
+    # Stato utente
     st = USER_STATE.get(uid)
     if not st:
         reset_state(uid)
@@ -737,6 +746,7 @@ def handle_message(uid, chat_id, msg):
     phase = st["phase"]
     loc = parse_location_from_message(msg)
 
+    # 👉 FASE START (ora funziona)
     if phase == "start":
         if not loc:
             send_message(chat_id, INVALID_INPUT)
