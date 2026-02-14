@@ -45,6 +45,13 @@ ELEVATION_TIMEOUT = 10   # sec
 REDUCE_MAX_TRIES = 3
 RT_MIN_RADIUS_KM = 8.0
 
+# PNG static map: opzionale in base a distanza
+MAX_STATIC_MAP_KM = 80.0
+
+# Google Maps: numero massimo di via-points tra origine e destinazione
+# (valore prudente: 21 via-points => 23 punti totali con origine/destinazione)
+GMAPS_MAX_VIA_WAYPOINTS = 21
+
 app = Flask(__name__)
 
 # ======================================
@@ -166,7 +173,10 @@ CHOOSE_MODE = "🧭 Scegli il *tipo di percorso*:"
 ASK_START = "📍 Invia il *punto di partenza*."
 ASK_END = "🎯 Ora invia la *destinazione*."
 ASK_WAYPOINTS_STD = f"➕ Aggiungi waypoint (max *{MAX_WAYPOINTS_STANDARD}*) oppure premi *✅ Fine*."
-ASK_WAYPOINTS_RT = f"➕ Aggiungi waypoint *Round Trip* (max *{MAX_WAYPOINTS_ROUNDTRIP}*). Quando hai finito premi *✅ Fine*."
+ASK_WAYPOINTS_RT = (
+    f"➕ Aggiungi waypoint *Round Trip* (max *{MAX_WAYPOINTS_ROUNDTRIP}*). "
+    "Se *non vuoi aggiungere waypoint*, premi *✅ Fine* per generare un *Round Trip automatico*."
+)
 ASK_DIRECTION = "🧭 Scegli la *direzione* preferita per il Round Trip."
 ASK_STYLE_TEXT = "🎨 Scegli lo *stile del percorso*."
 PROCESSING = "⏳ Sto calcolando il percorso..."
@@ -179,12 +189,11 @@ ACCESS_DENIED = "❌ La tua richiesta di accesso è stata rifiutata."
 LIMITS_EXCEEDED = f"🚫 Il percorso supera i limiti consentiti (max *{MAX_ROUTE_KM} km*)."
 RT_TOO_FAR_WP = f"⚠️ Waypoint troppo lontano dalla partenza (max ~{MAX_RADIUS_KM} km in linea d’aria)."
 
-# ISTRUZIONI PER L'UTENTE (aggiunta)
+# ISTRUZIONI PER L'UTENTE (coordinate testuali disabilitate)
 HOW_TO_POSITION = (
     "ℹ️ *Come inserire una posizione*\n"
     "Puoi inviare:\n"
     "• Un *indirizzo* (es. `Via Roma 10, Milano`)\n"
-    "• Delle *coordinate* `lat,lon` (es. `45.4642, 9.1900`)\n"
     "• La *posizione* usando la graffetta 📎 di Telegram → *Posizione*\n\n"
     "_Suggerimento_: aggiungi *città* e *provincia* per risultati migliori.\n"
 )
@@ -296,6 +305,15 @@ def geocode_suggestions_keyboard(candidates):
     buttons.append([{"text": "🔄 Ricomincia", "callback_data": "action:restart"}])
     return {"inline_keyboard": buttons}
 
+def retry_error_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "🔁 Riprova calcolo", "callback_data": "action:retry_compute"}],
+            [{"text": "🔄 Ricomincia", "callback_data": "action:restart"}],
+            [{"text": "❌ Annulla", "callback_data": "action:cancel"}],
+        ]
+    }
+
 # ======================================
 # RESET STATO
 # ======================================
@@ -316,6 +334,9 @@ def reset_state(uid):
         # Geocoding migliorato
         "last_geo_candidates": None,  # lista [(lat,lon,name), ...]
         "geo_pick_phase": None,       # "start"|"end"|"wp_std"|"wp_rt"
+        # Google Maps link/KML pending (per versioni ridotte)
+        "pending_kml": None,
+        "pending_gmaps_url": None,
     }
 
 # ======================================
@@ -441,7 +462,7 @@ def route_valhalla(locations, style="rapido"):
     return None
 
 # ======================================
-# PNG — STADIA MAPS + FALLBACK OSM
+# PNG — STADIA MAPS + FALLBACK OSM (opzionale)
 # ======================================
 
 def subsample(coords, step=20, max_points=300):
@@ -490,6 +511,14 @@ def download_png(url):
     except Exception:
         return None
 
+def should_build_static_map(trip_km):
+    try:
+        if trip_km is None:
+            return False
+        return float(trip_km) <= MAX_STATIC_MAP_KM
+    except:
+        return False
+
 def build_static_map(coords, markers):
     # 1) Stadia con sottocampionamento (GET)
     if STADIA_TOKEN:
@@ -504,7 +533,7 @@ def build_static_map(coords, markers):
     return download_png(url)
 
 # ======================================
-# GEOCODING
+# GEOCODING (Italia prioritaria, coordinate testuali disabilitate)
 # ======================================
 
 def geocode_address(q, limit=5, countrycodes="it"):
@@ -521,9 +550,8 @@ def geocode_address(q, limit=5, countrycodes="it"):
         "format": "json",
         "limit": str(limit),
         "accept-language": "it",
+        "countrycodes": countrycodes or "it",
     }
-    if countrycodes:
-        params["countrycodes"] = countrycodes
 
     headers = {"User-Agent": GEOCODING_UA, "Referer": "https://t.me/your_bot"}
     try:
@@ -544,29 +572,17 @@ def geocode_address(q, limit=5, countrycodes="it"):
         return []
 
 def parse_location_from_message(msg):
-    # 1) Posizione Telegram
+    # 1) Posizione Telegram (valida)
     if "location" in msg:
         loc = msg["location"]
         return (loc["latitude"], loc["longitude"])
 
-    # 2) Testo (indirizzo o coordinate)
+    # 2) Testo (indirizzo) — coordinate testuali DISABILITATE
     text = (msg.get("text") or "").strip()
     if not text:
         return None
 
-    # 2.a) coordinate "lat,lon"
-    if "," in text:
-        parts = text.split(",")
-        if len(parts) == 2:
-            try:
-                lat = float(parts[0].strip())
-                lon = float(parts[1].strip())
-                if -90 <= lat <= 90 and -180 <= lon <= 180:
-                    return (lat, lon)
-            except:
-                pass
-
-    # 2.b) geocoding con suggerimenti
+    # geocoding con suggerimenti (Italia prioritaria)
     candidates = geocode_address(text, limit=5, countrycodes="it")
     if not candidates:
         return None
@@ -578,7 +594,7 @@ def parse_location_from_message(msg):
     return ("SUGGEST", candidates)
 
 # ======================================
-# ESTRARRE COORDINATE E MANOVRE DA VALHALLA (FIX: tutte le legs)
+# ESTRARRE COORDINATE E MANOVRE DA VALHALLA (tutte le legs)
 # ======================================
 
 def decode_polyline6(polyline_str):
@@ -971,6 +987,87 @@ def try_reduce_standard(start, end, wps, style):
     return None, None, None, None, local_style
 
 # ======================================
+# GOOGLE MAPS (link Directions) + KML
+# ======================================
+
+def format_latlon(lat, lon, decimals=5):
+    return f"{lat:.{decimals}f},{lon:.{decimals}f}"
+
+def sample_waypoints_for_gmaps(coords, max_vias=GMAPS_MAX_VIA_WAYPOINTS):
+    """
+    Restituisce una lista di via-points (senza il primo/ultimo) campionati uniformemente,
+    al massimo `max_vias`. Serve a "forzare" Google Maps a seguire la traccia.
+    """
+    if not coords or len(coords) < 3 or max_vias <= 0:
+        return []
+    # numero desiderato di via points interni
+    k = min(max_vias, max(0, len(coords) - 2))
+    # indici uniformi tra 1 e len(coords)-2
+    vias = []
+    if k == 0:
+        return vias
+    step = (len(coords) - 2) / (k + 1)
+    for i in range(1, k + 1):
+        idx = int(round(i * step))
+        idx = max(1, min(len(coords) - 2, idx))
+        vias.append(coords[idx])
+    # rimuovi eventuali duplicati vicini
+    dedup = []
+    last = None
+    for p in vias:
+        if last is None or (abs(p[0]-last[0]) > 1e-6 or abs(p[1]-last[1]) > 1e-6):
+            dedup.append(p)
+            last = p
+    return dedup
+
+def build_google_maps_directions_link(coords, roundtrip=False):
+    """
+    Costruisce un link Google Maps Directions con via-points per massimizzare la fedeltà.
+    """
+    if not coords or len(coords) < 2:
+        return None
+    origin = coords[0]
+    destination = coords[-1] if not roundtrip else coords[0]
+    vias = sample_waypoints_for_gmaps(coords, GMAPS_MAX_VIA_WAYPOINTS)
+
+    base = "https://www.google.com/maps/dir/?api=1"
+    origin_s = format_latlon(origin[0], origin[1])
+    dest_s = format_latlon(destination[0], destination[1])
+    params = [
+        f"origin={origin_s}",
+        f"destination={dest_s}",
+        "travelmode=driving"
+    ]
+    if vias:
+        way_s = "|".join([format_latlon(lat, lon) for lat, lon in vias])
+        params.append(f"waypoints={way_s}")
+    return base + "&" + "&".join(params)
+
+def build_kml_from_coords(coords, name="Percorso Moto"):
+    """Crea un KML semplice (LineString) per Google My Maps."""
+    if not coords or len(coords) < 2:
+        return None
+    # KML vuole lon,lat (in quell'ordine)
+    coord_str = " ".join([f"{lon:.6f},{lat:.6f},0" for lat, lon in coords])
+    kml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>{name}</name>
+    <Placemark>
+      <name>{name}</name>
+      <Style>
+        <LineStyle><color>ff0000ff</color><width>4</width></LineStyle>
+      </Style>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>{coord_str}</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>'''
+    return kml.encode('utf-8')
+
+# ======================================
 # CALCOLO PERCORSO (e gestione riduzione/accetta)
 # ======================================
 
@@ -1009,7 +1106,7 @@ def compute_and_maybe_reduce(uid, chat_id):
         send_message(chat_id, PROCESSING)
         val = route_valhalla(locs, style=style)
         if not val:
-            send_message(chat_id, "❌ Errore Valhalla. Riprova più tardi.")
+            send_message(chat_id, "❌ Errore Valhalla. Riprova più tardi.", reply_markup=retry_error_keyboard())
             return
         trip_km = val.get("trip", {}).get("summary", {}).get("length")
         trip_time = val.get("trip", {}).get("summary", {}).get("time")
@@ -1025,21 +1122,32 @@ def compute_and_maybe_reduce(uid, chat_id):
                 send_message(
                     chat_id,
                     "⚠️ Non riesco a rientrare nei limiti senza modifiche ulteriori. "
-                    "Riduci i waypoint oppure scegli uno stile più rapido (⚡ Rapido / 🌀 Curvy leggero)."
+                    "Riduci i waypoint oppure scegli uno stile più rapido (⚡ Rapido / 🌀 Curvy leggero).",
+                    reply_markup=retry_error_keyboard()
                 )
                 reset_state(uid)
                 return
             trip_km2 = val2.get("trip", {}).get("summary", {}).get("length")
             trip_time2 = val2.get("trip", {}).get("summary", {}).get("time")
-            coords2, _ = (ensure_closed_loop_if_roundtrip(coords2, start, True), man2)
+            coords2 = ensure_closed_loop_if_roundtrip(coords2, start, True)
+
             ele_list, elev_summary = compute_elevation_for_route(coords2) if ELEVATION_ENABLED else (None, None)
-            gpx_turns = build_gpx_with_turns(coords2, man2, ele_list)
-            gpx_simple = build_gpx_simple(coords2, ele_list)
+            gpx_route = build_gpx_with_turns(coords2, man2, ele_list)   # con manovre
+            gpx_track = build_gpx_simple(coords2, ele_list)             # traccia
+
+            # Google Maps: link + KML
+            gmaps_url = build_google_maps_directions_link(coords2, roundtrip=True)
+            kml_bytes = build_kml_from_coords(coords2, name="Round Trip Moto")
+
             markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in wps2]
-            png_bytes = build_static_map(coords2, markers)
+            png_bytes = None
+            if should_build_static_map(trip_km2):
+                png_bytes = build_static_map(coords2, markers)
+
+            # memorizza pending
             st["pending_delivery"] = {
-                "gpx_turns": gpx_turns,
-                "gpx_simple": gpx_simple,
+                "gpx_route": gpx_route,
+                "gpx_track": gpx_track,
                 "png": png_bytes,
                 "summary": {
                     "mode": "Round Trip",
@@ -1047,9 +1155,12 @@ def compute_and_maybe_reduce(uid, chat_id):
                     "style": style2,
                     "km": trip_km2,
                     "secs": trip_time2,
-                    "elev": elev_summary
+                    "elev": elev_summary,
                 }
             }
+            st["pending_kml"] = kml_bytes
+            st["pending_gmaps_url"] = gmaps_url
+
             msg = (
                 f"✅ Riduzione completata: ora ~{trip_km2:.1f} km "
                 f"(prima ~{trip_km:.1f} km).\n"
@@ -1060,16 +1171,24 @@ def compute_and_maybe_reduce(uid, chat_id):
 
         coords, maneuvers = extract_coords_and_maneuvers(val)
         if not coords:
-            send_message(chat_id, "❌ Errore nel percorso.")
+            send_message(chat_id, "❌ Errore nel percorso.", reply_markup=retry_error_keyboard())
             return
         coords = ensure_closed_loop_if_roundtrip(coords, start, True)
 
         ele_list, elev_summary = compute_elevation_for_route(coords) if ELEVATION_ENABLED else (None, None)
-        gpx_turns = build_gpx_with_turns(coords, maneuvers, ele_list)
-        gpx_simple = build_gpx_simple(coords, ele_list)
-        markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in auto_wps]
-        png_bytes = build_static_map(coords, markers)
+        gpx_route = build_gpx_with_turns(coords, maneuvers, ele_list)  # con manovre
+        gpx_track = build_gpx_simple(coords, ele_list)                  # traccia
 
+        # Google Maps
+        gmaps_url = build_google_maps_directions_link(coords, roundtrip=True)
+        kml_bytes = build_kml_from_coords(coords, name="Round Trip Moto")
+
+        markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in auto_wps]
+        png_bytes = None
+        if should_build_static_map(trip_km):
+            png_bytes = build_static_map(coords, markers)
+
+        # rate-limit (diretto)
         if not check_rate_limit(uid):
             last = LAST_DOWNLOAD.get(uid)
             unlock = last + RATE_LIMIT_DAYS*86400
@@ -1077,13 +1196,15 @@ def compute_and_maybe_reduce(uid, chat_id):
             return
         update_rate_limit(uid)
 
-        send_document(chat_id, gpx_turns, "route_turns.gpx", caption="📄 GPX con manovre")
-        send_document(chat_id, gpx_simple, "route_track.gpx", caption="📄 GPX semplice (solo traccia)")
+        # Invio file
+        send_document(chat_id, gpx_route, "route.gpx", caption="📄 GPX *route* (navigatori, con manovre)")
+        send_document(chat_id, gpx_track, "track.gpx", caption="📄 GPX *track* (solo traccia)")
+        if kml_bytes:
+            send_document(chat_id, kml_bytes, "track.kml", caption="📄 KML (Google My Maps)")
+
         if png_bytes:
             send_photo(chat_id, png_bytes, caption="🗺 Mappa del percorso")
-        else:
-            send_message(chat_id, "⚠️ Mappa non disponibile al momento.")
-
+        # Summary + Google Maps link
         dist_label = f"{trip_km:.1f} km" if isinstance(trip_km, (int, float)) else "n/d"
         time_label = format_time(trip_time)
         dir_label = f" (direzione: {st.get('direction')})" if st.get("direction") and st.get("direction") != "skip" else ""
@@ -1093,6 +1214,7 @@ def compute_and_maybe_reduce(uid, chat_id):
             if elev_summary.get("min") is not None and elev_summary.get("max") is not None:
                 elev_line += f" (min {elev_summary['min']:.0f} m, max {elev_summary['max']:.0f} m)"
             elev_line += "\n"
+        maps_line = f"• Google Maps (fedeltà limitata, con via-points):\n{gmaps_url}\n" if gmaps_url else ""
 
         summary = (
             "✅ *Percorso pronto*\n"
@@ -1101,6 +1223,7 @@ def compute_and_maybe_reduce(uid, chat_id):
             f"• Distanza: ~{dist_label}\n"
             f"• Tempo stimato: {time_label}\n"
             f"{elev_line}"
+            f"{maps_line}"
             f"• Waypoint: {len(auto_wps)}\n"
             f"• Generato: {epoch_to_str(now_epoch())}\n"
             f"Limiti attivi: max {MAX_ROUTE_KM} km, max {MAX_WAYPOINTS_ROUNDTRIP} waypoint manuali (RT)\n"
@@ -1124,7 +1247,7 @@ def compute_and_maybe_reduce(uid, chat_id):
         send_message(chat_id, PROCESSING)
         val = route_valhalla(locs, style=style)
         if not val:
-            send_message(chat_id, "❌ Errore Valhalla. Riprova più tardi.")
+            send_message(chat_id, "❌ Errore Valhalla. Riprova più tardi.", reply_markup=retry_error_keyboard())
             return
         trip_km = val.get("trip", {}).get("summary", {}).get("length")
         trip_time = val.get("trip", {}).get("summary", {}).get("time")
@@ -1140,20 +1263,30 @@ def compute_and_maybe_reduce(uid, chat_id):
                 send_message(
                     chat_id,
                     "⚠️ Non riesco a rientrare nei limiti senza modifiche ulteriori. "
-                    "Riduci i waypoint oppure scegli uno stile più rapido (⚡ Rapido / 🌀 Curvy leggero)."
+                    "Riduci i waypoint oppure scegli uno stile più rapido (⚡ Rapido / 🌀 Curvy leggero).",
+                    reply_markup=retry_error_keyboard()
                 )
                 reset_state(uid)
                 return
             trip_km2 = val2.get("trip", {}).get("summary", {}).get("length")
             trip_time2 = val2.get("trip", {}).get("summary", {}).get("time")
+
             ele_list, elev_summary = compute_elevation_for_route(coords2) if ELEVATION_ENABLED else (None, None)
-            gpx_turns = build_gpx_with_turns(coords2, man2, ele_list)
-            gpx_simple = build_gpx_simple(coords2, ele_list)
+            gpx_route = build_gpx_with_turns(coords2, man2, ele_list)
+            gpx_track = build_gpx_simple(coords2, ele_list)
+
+            # Google Maps
+            gmaps_url = build_google_maps_directions_link(coords2, roundtrip=False)
+            kml_bytes = build_kml_from_coords(coords2, name="Percorso Moto")
+
             markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in wps2] + [(end["lat"], end["lon"])]
-            png_bytes = build_static_map(coords2, markers)
+            png_bytes = None
+            if should_build_static_map(trip_km2):
+                png_bytes = build_static_map(coords2, markers)
+
             st["pending_delivery"] = {
-                "gpx_turns": gpx_turns,
-                "gpx_simple": gpx_simple,
+                "gpx_route": gpx_route,
+                "gpx_track": gpx_track,
                 "png": png_bytes,
                 "summary": {
                     "mode": "Standard",
@@ -1164,6 +1297,9 @@ def compute_and_maybe_reduce(uid, chat_id):
                     "elev": elev_summary
                 }
             }
+            st["pending_kml"] = kml_bytes
+            st["pending_gmaps_url"] = gmaps_url
+
             msg = (
                 f"✅ Riduzione completata: ora ~{trip_km2:.1f} km "
                 f"(prima ~{trip_km:.1f} km).\n"
@@ -1174,13 +1310,21 @@ def compute_and_maybe_reduce(uid, chat_id):
 
         coords, maneuvers = extract_coords_and_maneuvers(val)
         if not coords:
-            send_message(chat_id, "❌ Errore nel percorso.")
+            send_message(chat_id, "❌ Errore nel percorso.", reply_markup=retry_error_keyboard())
             return
+
         ele_list, elev_summary = compute_elevation_for_route(coords) if ELEVATION_ENABLED else (None, None)
-        gpx_turns = build_gpx_with_turns(coords, maneuvers, ele_list)
-        gpx_simple = build_gpx_simple(coords, ele_list)
+        gpx_route = build_gpx_with_turns(coords, maneuvers, ele_list)
+        gpx_track = build_gpx_simple(coords, ele_list)
+
+        # Google Maps
+        gmaps_url = build_google_maps_directions_link(coords, roundtrip=False)
+        kml_bytes = build_kml_from_coords(coords, name="Percorso Moto")
+
         markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in wps] + [(end["lat"], end["lon"])]
-        png_bytes = build_static_map(coords, markers)
+        png_bytes = None
+        if should_build_static_map(trip_km):
+            png_bytes = build_static_map(coords, markers)
 
         if not check_rate_limit(uid):
             last = LAST_DOWNLOAD.get(uid)
@@ -1189,12 +1333,13 @@ def compute_and_maybe_reduce(uid, chat_id):
             return
         update_rate_limit(uid)
 
-        send_document(chat_id, gpx_turns, "route_turns.gpx", caption="📄 GPX con manovre")
-        send_document(chat_id, gpx_simple, "route_track.gpx", caption="📄 GPX semplice (solo traccia)")
+        send_document(chat_id, gpx_route, "route.gpx", caption="📄 GPX *route* (navigatori, con manovre)")
+        send_document(chat_id, gpx_track, "track.gpx", caption="📄 GPX *track* (solo traccia)")
+        if kml_bytes:
+            send_document(chat_id, kml_bytes, "track.kml", caption="📄 KML (Google My Maps)")
+
         if png_bytes:
             send_photo(chat_id, png_bytes, caption="🗺 Mappa del percorso")
-        else:
-            send_message(chat_id, "⚠️ Mappa non disponibile al momento.")
 
         dist_label = f"{trip_km:.1f} km" if isinstance(trip_km, (int, float)) else "n/d"
         time_label = format_time(trip_time)
@@ -1204,6 +1349,7 @@ def compute_and_maybe_reduce(uid, chat_id):
             if elev_summary.get("min") is not None and elev_summary.get("max") is not None:
                 elev_line += f" (min {elev_summary['min']:.0f} m, max {elev_summary['max']:.0f} m)"
             elev_line += "\n"
+        maps_line = f"• Google Maps (fedeltà limitata, con via-points):\n{gmaps_url}\n" if gmaps_url else ""
 
         summary = (
             "✅ *Percorso pronto*\n"
@@ -1212,6 +1358,7 @@ def compute_and_maybe_reduce(uid, chat_id):
             f"• Distanza: ~{dist_label}\n"
             f"• Tempo stimato: {time_label}\n"
             f"{elev_line}"
+            f"{maps_line}"
             f"• Waypoint: {len(wps)}\n"
             f"• Generato: {epoch_to_str(now_epoch())}\n"
             f"Limiti attivi: max {MAX_ROUTE_KM} km, max {MAX_WAYPOINTS_STANDARD} waypoint\n"
@@ -1259,6 +1406,12 @@ def handle_callback(uid, chat_id, cq_id, data):
     if data == "action:restart":
         reset_state(uid)
         send_message(chat_id, RESTARTED, reply_markup=cancel_restart_keyboard())
+        return
+
+    # Riprova calcolo (Valhalla error)
+    if data == "action:retry_compute":
+        answer_callback_query(cq_id, "Riprovo il calcolo…")
+        compute_and_maybe_reduce(uid, chat_id)
         return
 
     # Scelta modalità
@@ -1493,7 +1646,7 @@ def handle_message(uid, chat_id, msg):
         if not parsed:
             send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
             return
-        # coordinata diretta
+        # coordinata diretta (posizione Telegram o indirizzo singolo)
         if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
             lat, lon = parsed
             start = st["start"]
