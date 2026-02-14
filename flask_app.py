@@ -314,7 +314,7 @@ def admin_request_keyboard(uid:int, name:str):
     }
 
 # ======================================
-# RESET STATE (fondamentale!)
+# RESET STATE
 # ======================================
 
 def reset_state(uid):
@@ -329,8 +329,10 @@ def reset_state(uid):
     }
 
 # ======================================
-# ROUND TRIP LOGIC
+# ROUND TRIP LOGIC (NUOVA VERSIONE)
 # ======================================
+
+import random
 
 BEARING_MAP = {
     "N": 0, "NE": 45, "E": 90, "SE": 135,
@@ -350,22 +352,36 @@ def offset_point(lat, lon, km, bearing_deg):
     return (lat2*180/pi, lon2*180/pi)
 
 def seed_roundtrip_locations(start_lat, start_lon, base_km, bearing_deg):
-    a_bearing = (bearing_deg + 90) % 360
-    b_bearing = (bearing_deg + 180) % 360
-    wp_a = offset_point(start_lat, start_lon, base_km, a_bearing)
-    wp_b = offset_point(start_lat, start_lon, base_km * 0.9, b_bearing)
-    return [{"lat": wp_a[0], "lon": wp_a[1]},
-            {"lat": wp_b[0], "lon": wp_b[1]}]
+    """
+    3 waypoint:
+    - wp1: direzione scelta (forte)
+    - wp2: deviazione random (destra o sinistra)
+    - wp3: deviazione opposta più corta
+    """
+    wp1 = offset_point(start_lat, start_lon, base_km, bearing_deg)
+
+    deviation = random.choice([-35, 35])
+
+    wp2 = offset_point(start_lat, start_lon, base_km * 0.85, (bearing_deg + deviation) % 360)
+    wp3 = offset_point(start_lat, start_lon, base_km * 0.65, (bearing_deg - deviation/2) % 360)
+
+    return [
+        {"lat": wp1[0], "lon": wp1[1]},
+        {"lat": wp2[0], "lon": wp2[1]},
+        {"lat": wp3[0], "lon": wp3[1]},
+    ]
 
 def tune_roundtrip_length(start_lat, start_lon, waypoints, desired_min=RT_TARGET_MIN, desired_max=RT_TARGET_MAX, bearing_deg=45):
-    if waypoints:
-        base_candidates = [18, 20, 22]
-    else:
-        base_candidates = [18, 20, 22, 24, 26]
+    """
+    Adatta la lunghezza dell'anello scegliendo il base_km migliore.
+    Compatibile con i 3 waypoint.
+    """
+    base_candidates = [18, 20, 22, 24, 26]
 
     best = None
     for base in base_candidates:
         locs = [{"lat": start_lat, "lon": start_lon}]
+
         if waypoints:
             locs += [{"lat": w[0], "lon": w[1]} for w in waypoints]
         else:
@@ -403,7 +419,7 @@ def post_valhalla(url, payload, timeout=30, retries=1):
 
 def build_motorcycle_costing(style, is_owner):
     """Restituisce i parametri di costing per i vari livelli di curvatura."""
-    
+
     # STANDARD (per tutti)
     if style == "standard":
         return {
@@ -595,25 +611,6 @@ def download_static_map(url):
     except:
         pass
     return None
-
-# ======================================
-# ROUTES DI SERVIZIO
-# ======================================
-
-@app.route("/", methods=["GET"])
-def home():
-    return "OK - MotoRoute Bot (Valhalla) online."
-
-@app.route("/healthz", methods=["GET"])
-def healthz():
-    return jsonify(
-        status="ok",
-        valhalla=bool(VALHALLA_URL),
-        fallback=bool(VALHALLA_URL_FALLBACK),
-        max_wp=MAX_WAYPOINTS,
-        owner=bool(OWNER_ID),
-        authorized=len(AUTHORIZED)
-    )
 # ======================================
 # CALCOLO PERCORSO E INVIO RISULTATI
 # ======================================
@@ -640,9 +637,15 @@ def compute_route_and_send(uid, chat_id):
     # --- Build locations ---
     if roundtrip:
         locs = [{"lat": start[0], "lon": start[1]}]
+
+        # Waypoint manuali dell’utente
         for w in wps:
             locs.append({"lat": w[0], "lon": w[1]})
+
+        # Direzione scelta
         bearing = BEARING_MAP.get(state.get("direction") or "NE", 45)
+
+        # Generazione automatica dei waypoint dell’anello
         locs, used_base, approx_km = tune_roundtrip_length(
             start[0], start[1],
             wps,
@@ -650,10 +653,12 @@ def compute_route_and_send(uid, chat_id):
             desired_max=RT_TARGET_MAX,
             bearing_deg=bearing
         )
+
     else:
         if not end:
             send_message(chat_id, "❌ Destinazione mancante. Ricomincia con /start.")
             return
+
         locs = [{"lat": start[0], "lon": start[1]}]
         for w in wps:
             locs.append({"lat": w[0], "lon": w[1]})
@@ -726,7 +731,6 @@ def compute_route_and_send(uid, chat_id):
     )
 
     reset_state(uid)
-
 # ======================================
 # WEBHOOK
 # ======================================
@@ -925,6 +929,7 @@ def webhook(token):
             return jsonify(ok=True)
 
     return jsonify(ok=True)
+
 # ======================================
 # AVVIO FLASK
 # ======================================
