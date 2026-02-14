@@ -152,126 +152,6 @@ def answer_callback_query(cq_id, text=None):
         pass
 
 # ======================================
-# GEOCODING
-# ======================================
-
-def geocode_address(q):
-    if not q:
-        return None
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": q, "format": "json", "limit": 1, "accept-language": "it"}
-    headers = {"User-Agent": GEOCODING_UA, "Referer": "https://t.me/your_bot"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            return None
-        return (float(data[0]["lat"]), float(data[0]["lon"]))
-    except Exception:
-        return None
-
-def parse_location_from_message(msg):
-    if "location" in msg:
-        loc = msg["location"]
-        return (loc["latitude"], loc["longitude"])
-    text = (msg.get("text") or "").strip()
-    if not text:
-        return None
-    # supporto coordinate "lat,lon"
-    if "," in text:
-        parts = text.split(",")
-        if len(parts) == 2:
-            try:
-                lat = float(parts[0].strip())
-                lon = float(parts[1].strip())
-                if -90 <= lat <= 90 and -180 <= lon <= 180:
-                    return (lat, lon)
-            except:
-                pass
-    # altrimenti geocoding
-    return geocode_address(text)
-
-# ======================================
-# GPX
-# ======================================
-
-def build_gpx_with_turns(coords, maneuvers, ele_list=None, name="Percorso Moto"):
-    gpx = gpxpy.gpx.GPX()
-    trk = gpxpy.gpx.GPXTrack(name=name)
-    seg = gpxpy.gpx.GPXTrackSegment()
-    trk.segments.append(seg)
-    gpx.tracks.append(trk)
-
-    n = len(coords)
-    for i, (lat, lon) in enumerate(coords):
-        p = gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon)
-        if ele_list is not None and n > 1:
-            # mappa indicizzata: ele_list deve essere lunga n o mappata per indice
-            try:
-                ele = ele_list[i]
-            except:
-                ele = None
-            if ele is not None:
-                p.elevation = float(ele)
-        seg.points.append(p)
-
-    # Waypoint per le manovre
-    for m in maneuvers or []:
-        lat = m.get("lat")
-        lon = m.get("lon")
-        instr = m.get("instruction", "")
-        if lat is None or lon is None:
-            continue
-        gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, name=instr))
-
-    return gpx.to_xml().encode("utf-8")
-
-def build_gpx_simple(coords, ele_list=None, name="Percorso Moto (semplice)"):
-    gpx = gpxpy.gpx.GPX()
-    trk = gpxpy.gpx.GPXTrack(name=name)
-    seg = gpxpy.gpx.GPXTrackSegment()
-    trk.segments.append(seg)
-    gpx.tracks.append(trk)
-
-    n = len(coords)
-    for i, (lat, lon) in enumerate(coords):
-        p = gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon)
-        if ele_list is not None and n > 1:
-            try:
-                ele = ele_list[i]
-            except:
-                ele = None
-            if ele is not None:
-                p.elevation = float(ele)
-        seg.points.append(p)
-
-    return gpx.to_xml().encode("utf-8")
-
-# ======================================
-# POLYLINE DECODER (precisione 1e-6 conforme Valhalla)
-# ======================================
-
-def decode_polyline6(polyline_str):
-    index, lat, lng, coords = 0, 0, 0, []
-    changes = {"lat": 0, "lng": 0}
-    while index < len(polyline_str):
-        for unit in ("lat", "lng"):
-            shift, result = 0, 0
-            while True:
-                b = ord(polyline_str[index]) - 63
-                index += 1
-                result |= (b & 0x1f) << shift
-                shift += 5
-                if b < 0x20:
-                    break
-            changes[unit] = ~(result >> 1) if (result & 1) else (result >> 1)
-        lat += changes["lat"]
-        lng += changes["lng"]
-        coords.append((lat / 1e6, lng / 1e6))
-    return coords
-
-# ======================================
 # MESSAGGI STANDARD
 # ======================================
 
@@ -283,7 +163,7 @@ WELCOME = (
     "⏳ _Se il bot non parte subito, attendi qualche minuto: il server potrebbe essere in avvio._"
 )
 CHOOSE_MODE = "🧭 Scegli il *tipo di percorso*:"
-ASK_START = "📍 Invia il *punto di partenza* (posizione, indirizzo o lat,lon)."
+ASK_START = "📍 Invia il *punto di partenza*."
 ASK_END = "🎯 Ora invia la *destinazione*."
 ASK_WAYPOINTS_STD = f"➕ Aggiungi waypoint (max *{MAX_WAYPOINTS_STANDARD}*) oppure premi *✅ Fine*."
 ASK_WAYPOINTS_RT = f"➕ Aggiungi waypoint *Round Trip* (max *{MAX_WAYPOINTS_ROUNDTRIP}*). Quando hai finito premi *✅ Fine*."
@@ -298,6 +178,24 @@ ACCESS_GRANTED = "✅ Accesso approvato! Ora puoi usare il bot."
 ACCESS_DENIED = "❌ La tua richiesta di accesso è stata rifiutata."
 LIMITS_EXCEEDED = f"🚫 Il percorso supera i limiti consentiti (max *{MAX_ROUTE_KM} km*)."
 RT_TOO_FAR_WP = f"⚠️ Waypoint troppo lontano dalla partenza (max ~{MAX_RADIUS_KM} km in linea d’aria)."
+
+# ISTRUZIONI PER L'UTENTE (aggiunta)
+HOW_TO_POSITION = (
+    "ℹ️ *Come inserire una posizione*\n"
+    "Puoi inviare:\n"
+    "• Un *indirizzo* (es. `Via Roma 10, Milano`)\n"
+    "• Delle *coordinate* `lat,lon` (es. `45.4642, 9.1900`)\n"
+    "• La *posizione* usando la graffetta 📎 di Telegram → *Posizione*\n\n"
+    "_Suggerimento_: aggiungi *città* e *provincia* per risultati migliori.\n"
+)
+
+ASK_REPHRASE_OR_SUGGEST = (
+    "⚠️ Non ho trovato un indirizzo valido.\n"
+    "Riprova scrivendo *via + numero + città* (es. `Via Garibaldi 25, Como`).\n"
+    "Oppure invia direttamente la tua *posizione* 📍."
+)
+
+CHOOSE_SUGGESTION = "🔎 Ho trovato questi risultati. Scegli quello giusto:"
 
 # ======================================
 # TASTIERE
@@ -388,6 +286,16 @@ def admin_request_keyboard(uid, uname):
         ]
     }
 
+def geocode_suggestions_keyboard(candidates):
+    # Mostra max 5 bottoni numerati
+    buttons = []
+    for i, (_, _, name) in enumerate(candidates[:5], start=1):
+        label = f"{i}. {name[:50]}{'…' if len(name) > 50 else ''}"
+        buttons.append([{"text": label, "callback_data": f"geo_pick:{i-1}"}])
+    buttons.append([{"text": "❌ Annulla", "callback_data": "action:cancel"}])
+    buttons.append([{"text": "🔄 Ricomincia", "callback_data": "action:restart"}])
+    return {"inline_keyboard": buttons}
+
 # ======================================
 # RESET STATO
 # ======================================
@@ -405,6 +313,9 @@ def reset_state(uid):
         "direction": None,            # "N", "NE", ..., "NO" | "skip"
         "style": None,                # "rapido"|"curvy_light"|"curvy"|"super_curvy"|"extreme"
         "pending_delivery": None,     # contenuto pronto se ridotto e in attesa Accetta
+        # Geocoding migliorato
+        "last_geo_candidates": None,  # lista [(lat,lon,name), ...]
+        "geo_pick_phase": None,       # "start"|"end"|"wp_std"|"wp_rt"
     }
 
 # ======================================
@@ -443,7 +354,6 @@ def distribute_rt_waypoints(start, dir_code, manual_wps, total_target, radius_km
     """
     base_angle = DIR_ANGLES.get(dir_code, DIR_ANGLES["NE_DEF"])
     slots_deg = [base_angle - 40.0, base_angle, base_angle + 40.0]
-    # assegna manuali allo slot “più vicino” in bearing
     assigned = [None, None, None]
 
     def bearing_from_start(p):
@@ -460,7 +370,6 @@ def distribute_rt_waypoints(start, dir_code, manual_wps, total_target, radius_km
         b = bearing_from_start(p)
         diffs = [abs(((b - s + 180) % 360) - 180) for s in slots_deg]
         idx = diffs.index(min(diffs))
-        # se occupato, mettilo nel primo slot libero
         if assigned[idx] is None:
             assigned[idx] = p
         else:
@@ -483,7 +392,6 @@ def distribute_rt_waypoints(start, dir_code, manual_wps, total_target, radius_km
             )
             assigned[i] = {"lat": lat2 * 180.0 / pi, "lon": lon2 * 180.0 / pi}
 
-    # prendi i primi 'total_target'
     return assigned[:total_target]
 
 # ======================================
@@ -502,8 +410,6 @@ def post_valhalla(url, payload):
 def route_valhalla(locations, style="rapido"):
     costing = "motorcycle"
 
-    # Parametri “sicuri” e supportati comunemente
-    # Rapido: veloce, senza pedaggi; Curvy: preferisci secondarie (no pedaggi); premium più spinto.
     if style == "rapido":
         co = {"use_highways": 0.9, "use_tolls": 0.0, "shortest": False}
     elif style == "curvy_light":
@@ -513,7 +419,6 @@ def route_valhalla(locations, style="rapido"):
     elif style == "super_curvy":
         co = {"use_highways": 0.1, "use_tolls": 0.0, "shortest": False}
     elif style == "extreme":
-        # consentiamo reti minori (anche non asfaltate, dipende dai dati tiles)
         co = {"use_highways": 0.05, "use_tolls": 0.0, "shortest": False}
     else:
         co = {"use_highways": 0.5, "use_tolls": 0.0, "shortest": False}
@@ -599,29 +504,230 @@ def build_static_map(coords, markers):
     return download_png(url)
 
 # ======================================
-# ESTRARRE COORDINATE E MANOVRE DA VALHALLA
+# GEOCODING
 # ======================================
 
+def geocode_address(q, limit=5, countrycodes="it"):
+    """
+    Ritorna una lista di candidati [(lat, lon, display_name), ...] ordinati per rilevanza.
+    Se vuoto, nessun risultato.
+    """
+    if not q:
+        return []
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": q,
+        "format": "json",
+        "limit": str(limit),
+        "accept-language": "it",
+    }
+    if countrycodes:
+        params["countrycodes"] = countrycodes
+
+    headers = {"User-Agent": GEOCODING_UA, "Referer": "https://t.me/your_bot"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json() or []
+        out = []
+        for it in data:
+            try:
+                lat = float(it["lat"])
+                lon = float(it["lon"])
+                name = it.get("display_name", "").strip()
+                out.append((lat, lon, name))
+            except:
+                continue
+        return out
+    except Exception:
+        return []
+
+def parse_location_from_message(msg):
+    # 1) Posizione Telegram
+    if "location" in msg:
+        loc = msg["location"]
+        return (loc["latitude"], loc["longitude"])
+
+    # 2) Testo (indirizzo o coordinate)
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return None
+
+    # 2.a) coordinate "lat,lon"
+    if "," in text:
+        parts = text.split(",")
+        if len(parts) == 2:
+            try:
+                lat = float(parts[0].strip())
+                lon = float(parts[1].strip())
+                if -90 <= lat <= 90 and -180 <= lon <= 180:
+                    return (lat, lon)
+            except:
+                pass
+
+    # 2.b) geocoding con suggerimenti
+    candidates = geocode_address(text, limit=5, countrycodes="it")
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        lat, lon, _ = candidates[0]
+        return (lat, lon)
+
+    # più candidati → chiediamo all'utente di scegliere
+    return ("SUGGEST", candidates)
+
+# ======================================
+# ESTRARRE COORDINATE E MANOVRE DA VALHALLA (FIX: tutte le legs)
+# ======================================
+
+def decode_polyline6(polyline_str):
+    index, lat, lng, coords = 0, 0, 0, []
+    changes = {"lat": 0, "lng": 0}
+    while index < len(polyline_str):
+        for unit in ("lat", "lng"):
+            shift, result = 0, 0
+            while True:
+                b = ord(polyline_str[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            changes[unit] = ~(result >> 1) if (result & 1) else (result >> 1)
+        lat += changes["lat"]
+        lng += changes["lng"]
+        coords.append((lat / 1e6, lng / 1e6))
+    return coords
+
 def extract_coords_and_maneuvers(valhalla_json):
+    """
+    Estrae coordinate e manovre da TUTTE le legs del trip Valhalla,
+    concatenando le shape e correggendo gli indici delle manovre.
+    """
     if not valhalla_json:
         return None, None
+
     try:
-        shape = valhalla_json["trip"]["legs"][0]["shape"]
-        coords = decode_polyline6(shape)
-        maneuvers = []
-        for m in valhalla_json["trip"]["legs"][0]["maneuvers"]:
-            idx = m.get("begin_shape_index")
-            if idx is None:
+        trip = valhalla_json.get("trip", {})
+        legs = trip.get("legs", [])
+        if not legs:
+            return None, None
+
+        coords = []
+        maneuvers_out = []
+        global_len_before_leg = 0
+
+        for leg in legs:
+            shape = leg.get("shape")
+            if not shape:
                 continue
-            if 0 <= idx < len(coords):
-                maneuvers.append({
-                    "lat": coords[idx][0],
-                    "lon": coords[idx][1],
+
+            leg_coords = decode_polyline6(shape)
+            if not leg_coords:
+                continue
+
+            # Evita il punto duplicato di giunzione con la leg precedente
+            if coords and leg_coords and coords[-1] == leg_coords[0]:
+                leg_coords = leg_coords[1:]
+
+            # Riallinea le manovre a indice globale
+            for m in leg.get("maneuvers", []):
+                idx = m.get("begin_shape_index")
+                if idx is None:
+                    continue
+                global_idx = global_len_before_leg + idx
+
+                if 0 <= global_idx < len(coords):
+                    lat, lon = coords[global_idx]
+                else:
+                    rel = global_idx - len(coords)
+                    if 0 <= rel < len(leg_coords):
+                        lat, lon = leg_coords[rel]
+                    else:
+                        continue
+
+                maneuvers_out.append({
+                    "lat": lat,
+                    "lon": lon,
                     "instruction": m.get("instruction", "")
                 })
-        return coords, maneuvers
+
+            coords.extend(leg_coords)
+            global_len_before_leg = len(coords)
+
+        if not coords:
+            return None, None
+
+        return coords, maneuvers_out
+
     except Exception:
         return None, None
+
+def ensure_closed_loop_if_roundtrip(coords, start, is_roundtrip):
+    """Se Round Trip, assicura che l'ultimo punto coincida con la partenza."""
+    if not is_roundtrip or not coords or not start:
+        return coords
+    s = (round(start["lat"], 6), round(start["lon"], 6))
+    e = (round(coords[-1][0], 6), round(coords[-1][1], 6))
+    if s != e:
+        coords.append((start["lat"], start["lon"]))
+    return coords
+
+# ======================================
+# GPX
+# ======================================
+
+def build_gpx_with_turns(coords, maneuvers, ele_list=None, name="Percorso Moto"):
+    gpx = gpxpy.gpx.GPX()
+    trk = gpxpy.gpx.GPXTrack(name=name)
+    seg = gpxpy.gpx.GPXTrackSegment()
+    trk.segments.append(seg)
+    gpx.tracks.append(trk)
+
+    n = len(coords)
+    for i, (lat, lon) in enumerate(coords):
+        p = gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon)
+        if ele_list is not None and n > 1:
+            try:
+                ele = ele_list[i]
+            except:
+                ele = None
+            if ele is not None:
+                p.elevation = float(ele)
+        seg.points.append(p)
+
+    # Waypoint per le manovre
+    for m in maneuvers or []:
+        lat = m.get("lat")
+        lon = m.get("lon")
+        instr = m.get("instruction", "")
+        if lat is None or lon is None:
+            continue
+        gpx.waypoints.append(gpxpy.gpx.GPXWaypoint(latitude=lat, longitude=lon, name=instr))
+
+    return gpx.to_xml().encode("utf-8")
+
+def build_gpx_simple(coords, ele_list=None, name="Percorso Moto (semplice)"):
+    gpx = gpxpy.gpx.GPX()
+    trk = gpxpy.gpx.GPXTrack(name=name)
+    seg = gpxpy.gpx.GPXTrackSegment()
+    trk.segments.append(seg)
+    gpx.tracks.append(trk)
+
+    n = len(coords)
+    for i, (lat, lon) in enumerate(coords):
+        p = gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon)
+        if ele_list is not None and n > 1:
+            try:
+                ele = ele_list[i]
+            except:
+                ele = None
+            if ele is not None:
+                p.elevation = float(ele)
+        seg.points.append(p)
+
+    return gpx.to_xml().encode("utf-8")
 
 # ======================================
 # ELEVATION (OpenTopoData / OpenElevation)
@@ -640,9 +746,7 @@ def sample_along_coords(coords, step_m=50.0):
         seg_m = seg_km * 1000.0
         if seg_m <= 0:
             continue
-        # numero di punti interni da inserire
         needed = int((acc + seg_m) // step_m)
-        # posizione frazionaria lungo il segmento
         for n in range(1, needed+1):
             dist_m = n*step_m - acc
             if dist_m < 0 or dist_m > seg_m:
@@ -706,12 +810,10 @@ def compute_elevation_for_route(coords):
         return None, None
 
     sampled_pts = sample_along_coords(coords, step_m=ELEVATION_SAMPLE_M)
-    # prova OpenTopoData poi fallback OpenElevation
     elev = elevation_opentopodata(sampled_pts)
     if all(e is None for e in elev):
         elev = elevation_openelevation(sampled_pts)
 
-    # calcola dislivello +/-
     gain = 0.0
     loss = 0.0
     last = None
@@ -723,19 +825,16 @@ def compute_elevation_for_route(coords):
         elev_clean.append(float(e))
         if last is not None:
             delta = float(e) - last
-            if delta > 0.5:   # soglia anti-rumore
+            if delta > 0.5:
                 gain += delta
             elif delta < -0.5:
                 loss += -delta
         last = float(e) if e is not None else last
 
-    # min/max
     valid = [x for x in elev_clean if x is not None]
     min_ele = min(valid) if valid else None
     max_ele = max(valid) if valid else None
 
-    # mappa le elevazioni campionate all'intera lista coords:
-    # allineamento per indice proporzionale
     ele_full = []
     m = len(sampled_pts)
     n = len(coords)
@@ -773,23 +872,23 @@ def update_rate_limit(uid):
     LAST_DOWNLOAD[uid] = now_epoch()
 
 # ======================================
-# COSTRUZIONE LOCATIONS PER VALHALLA
+# COSTRUZIONE LOCATIONS PER VALHALLA (con type: "break")
 # ======================================
 
 def build_locations_standard(start, end, waypoints):
     locs = []
-    locs.append({"lat": start["lat"], "lon": start["lon"]})
+    locs.append({"lat": start["lat"], "lon": start["lon"], "type": "break"})
     for w in waypoints:
-        locs.append({"lat": w["lat"], "lon": w["lon"]})
-    locs.append({"lat": end["lat"], "lon": end["lon"]})
+        locs.append({"lat": w["lat"], "lon": w["lon"], "type": "break"})
+    locs.append({"lat": end["lat"], "lon": end["lon"], "type": "break"})
     return locs
 
 def build_locations_roundtrip(start, wps):
     locs = []
-    locs.append({"lat": start["lat"], "lon": start["lon"]})
+    locs.append({"lat": start["lat"], "lon": start["lon"], "type": "break"})
     for w in wps:
-        locs.append({"lat": w["lat"], "lon": w["lon"]})
-    locs.append({"lat": start["lat"], "lon": start["lon"]})
+        locs.append({"lat": w["lat"], "lon": w["lon"], "type": "break"})
+    locs.append({"lat": start["lat"], "lon": start["lon"], "type": "break"})
     return locs
 
 # ======================================
@@ -797,7 +896,6 @@ def build_locations_roundtrip(start, wps):
 # ======================================
 
 def precheck_radius_standard(start, end):
-    # Solo per A→B: raggio 80 km (linea d’aria)
     d = haversine_km((start["lat"], start["lon"]), (end["lat"], end["lon"]))
     return d <= MAX_RADIUS_KM
 
@@ -810,22 +908,16 @@ def precheck_approx_distance(locs, roundtrip):
 # ======================================
 
 def try_reduce_roundtrip(st, start, wps, style, tries_left):
-    """
-    Riduzione RT: riduci raggio e/o degrada stile fino a rientrare.
-    Ritorna tuple (valhalla_json, coords, maneuvers, new_wps, new_style) o (None, ...).
-    """
     radius = st.get("rt_radius_km", 25.0)
     direction = st.get("direction") or "NE"
     manual = st.get("waypoints_rt", [])[:]
     total_target = RT_TOTAL_WP_TARGET
 
     for attempt in range(REDUCE_MAX_TRIES):
-        # distribuisci manuali + auto con raggio attuale
         auto_wps = distribute_rt_waypoints(start, direction, manual, total_target, radius)
         locs = build_locations_roundtrip(start, auto_wps)
         val = route_valhalla(locs, style=style)
         if not val:
-            # prova a diminuire raggio e riprova
             radius = max(RT_MIN_RADIUS_KM, radius * 0.85)
             st["rt_radius_km"] = radius
             continue
@@ -837,26 +929,18 @@ def try_reduce_roundtrip(st, start, wps, style, tries_left):
                 st["rt_radius_km"] = radius
                 return val, coords, maneuvers, auto_wps, style
 
-        # non rientra, riduci raggio e se molto fuori degrada stile
         radius = max(RT_MIN_RADIUS_KM, radius * 0.85)
         st["rt_radius_km"] = radius
         if attempt >= 1:
-            # degrada stile
             if style == "curvy":
                 style = "curvy_light"
             elif style == "curvy_light":
                 style = "rapido"
-            # altrimenti resta com’è
 
     return None, None, None, None, style
 
 def try_reduce_standard(start, end, wps, style):
-    """
-    Standard: rimuovi il waypoint peggiore (deviazione maggiore) e/o degrada stile.
-    """
     def deviation_score(w):
-        # distanza dalla retta A-B (approssimata con distanza media ai segmenti)
-        # fallback: distanza media A->W + W->B - A->B
         ab = haversine_km((start["lat"], start["lon"]), (end["lat"], end["lon"]))
         aw = haversine_km((start["lat"], start["lon"]), (w["lat"], w["lon"]))
         wb = haversine_km((w["lat"], w["lon"]), (end["lat"], end["lon"]))
@@ -875,17 +959,14 @@ def try_reduce_standard(start, end, wps, style):
                 if coords:
                     return val, coords, maneuvers, local_wps, local_style
 
-        # non rientra: o rimuovo il peggiore o degrado stile
         if local_wps:
             worst = max(local_wps, key=deviation_score)
             local_wps.remove(worst)
         else:
-            # degrada stile
             if local_style == "curvy":
                 local_style = "curvy_light"
             elif local_style == "curvy_light":
                 local_style = "rapido"
-            # altrimenti resta
 
     return None, None, None, None, local_style
 
@@ -923,7 +1004,6 @@ def compute_and_maybe_reduce(uid, chat_id):
         direction = st.get("direction") or "NE"
         total_target = RT_TOTAL_WP_TARGET
         radius = st.get("rt_radius_km", 25.0)
-        # costruisci elenco finale: manuali + auto
         auto_wps = distribute_rt_waypoints(start, direction, manual, total_target, radius)
         locs = build_locations_roundtrip(start, auto_wps)
         send_message(chat_id, PROCESSING)
@@ -934,7 +1014,6 @@ def compute_and_maybe_reduce(uid, chat_id):
         trip_km = val.get("trip", {}).get("summary", {}).get("length")
         trip_time = val.get("trip", {}).get("summary", {}).get("time")
 
-        # post-check
         if isinstance(trip_km, (int, float)) and trip_km > MAX_ROUTE_KM:
             send_message(
                 chat_id,
@@ -950,15 +1029,14 @@ def compute_and_maybe_reduce(uid, chat_id):
                 )
                 reset_state(uid)
                 return
-            # prepara output (ma non inviare finché non accetta)
             trip_km2 = val2.get("trip", {}).get("summary", {}).get("length")
             trip_time2 = val2.get("trip", {}).get("summary", {}).get("time")
+            coords2, _ = (ensure_closed_loop_if_roundtrip(coords2, start, True), man2)
             ele_list, elev_summary = compute_elevation_for_route(coords2) if ELEVATION_ENABLED else (None, None)
             gpx_turns = build_gpx_with_turns(coords2, man2, ele_list)
             gpx_simple = build_gpx_simple(coords2, ele_list)
             markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in wps2]
             png_bytes = build_static_map(coords2, markers)
-            # memorizza pending
             st["pending_delivery"] = {
                 "gpx_turns": gpx_turns,
                 "gpx_simple": gpx_simple,
@@ -980,18 +1058,18 @@ def compute_and_maybe_reduce(uid, chat_id):
             send_message(chat_id, msg, reply_markup=reduce_confirm_keyboard())
             return
 
-        # entro limiti → invia subito
         coords, maneuvers = extract_coords_and_maneuvers(val)
         if not coords:
             send_message(chat_id, "❌ Errore nel percorso.")
             return
+        coords = ensure_closed_loop_if_roundtrip(coords, start, True)
+
         ele_list, elev_summary = compute_elevation_for_route(coords) if ELEVATION_ENABLED else (None, None)
         gpx_turns = build_gpx_with_turns(coords, maneuvers, ele_list)
         gpx_simple = build_gpx_simple(coords, ele_list)
         markers = [(start["lat"], start["lon"])] + [(w["lat"], w["lon"]) for w in auto_wps]
         png_bytes = build_static_map(coords, markers)
 
-        # rate-limit (diretto)
         if not check_rate_limit(uid):
             last = LAST_DOWNLOAD.get(uid)
             unlock = last + RATE_LIMIT_DAYS*86400
@@ -1035,7 +1113,6 @@ def compute_and_maybe_reduce(uid, chat_id):
     if mode == "standard":
         end = st["end"]
         wps = st["waypoints_std"]
-        # precheck raggio 80 km
         if not precheck_radius_standard(start, end):
             send_message(chat_id, f"🚫 Destinazione troppo lontana dalla partenza (max ~{MAX_RADIUS_KM} km in linea d’aria).")
             return
@@ -1095,7 +1172,6 @@ def compute_and_maybe_reduce(uid, chat_id):
             send_message(chat_id, msg, reply_markup=reduce_confirm_keyboard())
             return
 
-        # entro limiti → invia
         coords, maneuvers = extract_coords_and_maneuvers(val)
         if not coords:
             send_message(chat_id, "❌ Errore nel percorso.")
@@ -1191,13 +1267,13 @@ def handle_callback(uid, chat_id, cq_id, data):
         st["mode"] = mode
         st["roundtrip"] = (mode == "roundtrip")
         st["phase"] = "await_start"
-        send_message(chat_id, ASK_START, reply_markup=cancel_restart_keyboard())
+        send_message(chat_id, ASK_START + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
         return
 
     # Waypoints STD
     if data == "action:add_wp_std":
         st["phase"] = "await_wp_std"
-        send_message(chat_id, "📍 Invia il *waypoint* (posizione/indirizzo).", reply_markup=waypoints_keyboard_std())
+        send_message(chat_id, "📍 Invia il *waypoint* (posizione/indirizzo).\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
         return
     if data == "action:finish_waypoints_std":
         st["phase"] = "choose_style"
@@ -1207,7 +1283,7 @@ def handle_callback(uid, chat_id, cq_id, data):
     # Waypoints RT
     if data == "action:add_wp_rt":
         st["phase"] = "await_wp_rt"
-        send_message(chat_id, "📍 Invia il *waypoint Round Trip* (posizione/indirizzo).", reply_markup=waypoints_keyboard_rt())
+        send_message(chat_id, "📍 Invia il *waypoint Round Trip* (posizione/indirizzo).\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
         return
     if data == "action:finish_waypoints_rt":
         st["phase"] = "choose_style"
@@ -1219,13 +1295,12 @@ def handle_callback(uid, chat_id, cq_id, data):
         direction = data.split(":")[1]
         st["direction"] = direction
         st["phase"] = "waypoints_rt"
-        send_message(chat_id, ASK_WAYPOINTS_RT, reply_markup=waypoints_keyboard_rt())
+        send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
         return
 
     # Stile percorso
     if data.startswith("style:"):
         style = data.split(":")[1]
-        # blocco premium
         if style in ("super_curvy", "extreme") and uid != OWNER_ID:
             answer_callback_query(cq_id, "Solo utenti premium possono usare Super curvy")
             return
@@ -1234,53 +1309,71 @@ def handle_callback(uid, chat_id, cq_id, data):
         compute_and_maybe_reduce(uid, chat_id)
         return
 
-    # Riduzione: conferma
-    if data == "reduce:accept":
-        pend = st.get("pending_delivery")
-        if not pend:
-            answer_callback_query(cq_id, "Nessuna versione ridotta in attesa.")
+    # Geocoding: scelta di un suggerimento
+    if data.startswith("geo_pick:"):
+        try:
+            idx = int(data.split(":")[1])
+        except:
+            answer_callback_query(cq_id, "Selezione non valida.")
             return
-        # rate-limit check & update qui
-        if not check_rate_limit(uid) and uid != OWNER_ID:
-            last = LAST_DOWNLOAD.get(uid)
-            unlock = last + RATE_LIMIT_DAYS*86400
-            send_message(chat_id, f"⏳ Hai già scaricato un percorso di recente.\nPuoi riprovare dopo: *{epoch_to_str(unlock)}*")
+        candidates = st.get("last_geo_candidates") or []
+        if not candidates or idx < 0 or idx >= len(candidates):
+            answer_callback_query(cq_id, "Suggerimento non disponibile.")
             return
-        if uid != OWNER_ID:
-            update_rate_limit(uid)
+        lat, lon, name = candidates[idx]
+        phase_pick = st.get("geo_pick_phase")
 
-        send_document(chat_id, pend["gpx_turns"], "route_turns.gpx", caption="📄 GPX con manovre")
-        send_document(chat_id, pend["gpx_simple"], "route_track.gpx", caption="📄 GPX semplice (solo traccia)")
-        if pend.get("png"):
-            send_photo(chat_id, pend["png"], caption="🗺 Mappa del percorso")
-        s = pend["summary"]
-        dist_label = f"{s['km']:.1f} km" if isinstance(s.get("km"), (int, float)) else "n/d"
-        time_label = format_time(s.get("secs"))
-        dir_label = f" (direzione: {s['direction']})" if s.get("direction") else ""
-        elev_line = ""
-        if s.get("elev"):
-            elev_line = f"• Dislivello: +{s['elev']['gain']:.0f} m / -{s['elev']['loss']:.0f} m"
-            if s['elev'].get("min") is not None and s['elev'].get("max") is not None:
-                elev_line += f" (min {s['elev']['min']:.0f} m, max {s['elev']['max']:.0f} m)"
-            elev_line += "\n"
-        msg = (
-            "✅ *Percorso pronto (ridotto)*\n"
-            f"• Tipo: {s['mode']}{dir_label}\n"
-            f"• Stile: {s['style']}\n"
-            f"• Distanza: ~{dist_label}\n"
-            f"• Tempo stimato: {time_label}\n"
-            f"{elev_line}"
-            f"• Generato: {epoch_to_str(now_epoch())}\n"
-            f"Limiti attivi: max {MAX_ROUTE_KM} km\n"
-        )
-        send_message(chat_id, msg)
-        st["pending_delivery"] = None
-        reset_state(uid)
-        return
+        if phase_pick == "start":
+            st["start"] = {"lat": lat, "lon": lon}
+            st["last_geo_candidates"] = None
+            st["geo_pick_phase"] = None
+            if st["roundtrip"]:
+                st["phase"] = "choose_direction"
+                send_message(chat_id, f"✅ Partenza: {name}")
+                send_message(chat_id, ASK_DIRECTION, reply_markup=direction_8_keyboard())
+            else:
+                st["phase"] = "await_end"
+                send_message(chat_id, f"✅ Partenza: {name}")
+                send_message(chat_id, ASK_END + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
+            return
 
-    if data == "reduce:reject":
-        st["pending_delivery"] = None
-        send_message(chat_id, "👌 Operazione annullata. Puoi modificare i waypoint o scegliere uno stile più rapido.", reply_markup=cancel_restart_keyboard())
+        if phase_pick == "end":
+            st["end"] = {"lat": lat, "lon": lon}
+            st["last_geo_candidates"] = None
+            st["geo_pick_phase"] = None
+            st["phase"] = "waypoints_std"
+            send_message(chat_id, f"✅ Destinazione: {name}")
+            send_message(chat_id, ASK_WAYPOINTS_STD + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
+            return
+
+        if phase_pick == "wp_std":
+            if len(st["waypoints_std"]) >= MAX_WAYPOINTS_STANDARD:
+                answer_callback_query(cq_id, "Hai raggiunto il numero massimo di waypoint.")
+                return
+            st["waypoints_std"].append({"lat": lat, "lon": lon})
+            st["last_geo_candidates"] = None
+            st["geo_pick_phase"] = None
+            st["phase"] = "waypoints_std"
+            send_message(chat_id, f"✅ Waypoint aggiunto: {name}", reply_markup=waypoints_keyboard_std())
+            return
+
+        if phase_pick == "wp_rt":
+            start = st["start"]
+            d = haversine_km((start["lat"], start["lon"]), (lat, lon))
+            if d > MAX_RADIUS_KM:
+                answer_callback_query(cq_id, "Waypoint troppo lontano dalla partenza.")
+                return
+            if len(st["waypoints_rt"]) >= MAX_WAYPOINTS_ROUNDTRIP:
+                answer_callback_query(cq_id, "Hai raggiunto il numero massimo di waypoint RT.")
+                return
+            st["waypoints_rt"].append({"lat": lat, "lon": lon})
+            st["last_geo_candidates"] = None
+            st["geo_pick_phase"] = None
+            st["phase"] = "waypoints_rt"
+            send_message(chat_id, f"✅ Waypoint RT aggiunto: {name}", reply_markup=waypoints_keyboard_rt())
+            return
+
+        answer_callback_query(cq_id, "Fase non riconosciuta per la scelta.")
         return
 
     answer_callback_query(cq_id, "Comando non riconosciuto.")
@@ -1318,7 +1411,6 @@ def handle_message(uid, chat_id, msg):
         st = USER_STATE[uid]
 
     phase = st["phase"]
-    loc = parse_location_from_message(msg)
 
     # Sequenza fasi
     if phase == "choose_mode":
@@ -1326,78 +1418,131 @@ def handle_message(uid, chat_id, msg):
         return
 
     if phase == "await_start":
-        if not loc:
-            send_message(chat_id, INVALID_INPUT, reply_markup=cancel_restart_keyboard())
+        parsed = parse_location_from_message(msg)
+        if not parsed:
+            send_message(chat_id, INVALID_INPUT + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
             return
-        st["start"] = {"lat": loc[0], "lon": loc[1]}
-        if st["roundtrip"]:
-            st["phase"] = "choose_direction"
-            send_message(chat_id, ASK_DIRECTION, reply_markup=direction_8_keyboard())
-        else:
-            st["phase"] = "await_end"
-            send_message(chat_id, ASK_END, reply_markup=cancel_restart_keyboard())
+        if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
+            lat, lon = parsed
+            st["start"] = {"lat": lat, "lon": lon}
+            if st["roundtrip"]:
+                st["phase"] = "choose_direction"
+                send_message(chat_id, ASK_DIRECTION, reply_markup=direction_8_keyboard())
+            else:
+                st["phase"] = "await_end"
+                send_message(chat_id, ASK_END + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
+            return
+        if isinstance(parsed, tuple) and parsed[0] == "SUGGEST":
+            _, candidates = parsed
+            st["last_geo_candidates"] = candidates
+            st["geo_pick_phase"] = "start"
+            send_message(chat_id, CHOOSE_SUGGESTION, reply_markup=geocode_suggestions_keyboard(candidates))
+            return
+        send_message(chat_id, ASK_REPHRASE_OR_SUGGEST + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
         return
 
     if phase == "await_end":
-        if not loc:
-            send_message(chat_id, INVALID_INPUT, reply_markup=cancel_restart_keyboard())
+        parsed = parse_location_from_message(msg)
+        if not parsed:
+            send_message(chat_id, INVALID_INPUT + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
             return
-        st["end"] = {"lat": loc[0], "lon": loc[1]}
-        st["phase"] = "waypoints_std"
-        send_message(chat_id, ASK_WAYPOINTS_STD, reply_markup=waypoints_keyboard_std())
+        if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
+            lat, lon = parsed
+            st["end"] = {"lat": lat, "lon": lon}
+            st["phase"] = "waypoints_std"
+            send_message(chat_id, ASK_WAYPOINTS_STD + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
+            return
+        if isinstance(parsed, tuple) and parsed[0] == "SUGGEST":
+            _, candidates = parsed
+            st["last_geo_candidates"] = candidates
+            st["geo_pick_phase"] = "end"
+            send_message(chat_id, CHOOSE_SUGGESTION, reply_markup=geocode_suggestions_keyboard(candidates))
+            return
+        send_message(chat_id, ASK_REPHRASE_OR_SUGGEST + "\n\n" + HOW_TO_POSITION, reply_markup=cancel_restart_keyboard())
         return
 
     if phase == "await_wp_std":
-        if not loc:
-            send_message(chat_id, INVALID_INPUT, reply_markup=waypoints_keyboard_std())
+        parsed = parse_location_from_message(msg)
+        if not parsed:
+            send_message(chat_id, INVALID_INPUT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
             return
-        if len(st["waypoints_std"]) >= MAX_WAYPOINTS_STANDARD:
-            send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS_STANDARD} waypoint.")
+        if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
+            lat, lon = parsed
+            if len(st["waypoints_std"]) >= MAX_WAYPOINTS_STANDARD:
+                send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS_STANDARD} waypoint.")
+                return
+            st["waypoints_std"].append({"lat": lat, "lon": lon})
+            st["phase"] = "waypoints_std"
+            send_message(chat_id, ASK_WAYPOINTS_STD + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
             return
-        st["waypoints_std"].append({"lat": loc[0], "lon": loc[1]})
-        st["phase"] = "waypoints_std"
-        send_message(chat_id, ASK_WAYPOINTS_STD, reply_markup=waypoints_keyboard_std())
+        if isinstance(parsed, tuple) and parsed[0] == "SUGGEST":
+            _, candidates = parsed
+            st["last_geo_candidates"] = candidates
+            st["geo_pick_phase"] = "wp_std"
+            send_message(chat_id, CHOOSE_SUGGESTION, reply_markup=geocode_suggestions_keyboard(candidates))
+            return
+        send_message(chat_id, ASK_REPHRASE_OR_SUGGEST + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_std())
         return
 
     if phase == "choose_direction":
-        # l'utente deve selezionare da tastiera; se invia testo/posizione riproponi tastiera
         send_message(chat_id, ASK_DIRECTION, reply_markup=direction_8_keyboard())
         return
 
     if phase == "waypoints_rt":
-        # attende bottoni; se invia posizione, la consideriamo come aggiunta manuale
-        if loc:
-            # opzionale: scarta waypoint RT troppo lontani dalla partenza (80 km)
+        parsed = parse_location_from_message(msg)
+        if not parsed:
+            send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
+            return
+        # coordinata diretta
+        if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
+            lat, lon = parsed
             start = st["start"]
-            d = haversine_km((start["lat"], start["lon"]), (loc[0], loc[1]))
+            d = haversine_km((start["lat"], start["lon"]), (lat, lon))
             if d > MAX_RADIUS_KM:
                 send_message(chat_id, RT_TOO_FAR_WP, reply_markup=waypoints_keyboard_rt())
                 return
             if len(st["waypoints_rt"]) >= MAX_WAYPOINTS_ROUNDTRIP:
                 send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS_ROUNDTRIP} waypoint per il Round Trip.")
                 return
-            st["waypoints_rt"].append({"lat": loc[0], "lon": loc[1]})
-            send_message(chat_id, ASK_WAYPOINTS_RT, reply_markup=waypoints_keyboard_rt())
+            st["waypoints_rt"].append({"lat": lat, "lon": lon})
+            send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
             return
-        else:
-            send_message(chat_id, ASK_WAYPOINTS_RT, reply_markup=waypoints_keyboard_rt())
+        # suggerimenti
+        if isinstance(parsed, tuple) and parsed[0] == "SUGGEST":
+            _, candidates = parsed
+            st["last_geo_candidates"] = candidates
+            st["geo_pick_phase"] = "wp_rt"
+            send_message(chat_id, CHOOSE_SUGGESTION, reply_markup=geocode_suggestions_keyboard(candidates))
             return
+        send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
+        return
 
     if phase == "await_wp_rt":
-        if not loc:
-            send_message(chat_id, INVALID_INPUT, reply_markup=waypoints_keyboard_rt())
+        parsed = parse_location_from_message(msg)
+        if not parsed:
+            send_message(chat_id, INVALID_INPUT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
             return
-        start = st["start"]
-        d = haversine_km((start["lat"], start["lon"]), (loc[0], loc[1]))
-        if d > MAX_RADIUS_KM:
-            send_message(chat_id, RT_TOO_FAR_WP, reply_markup=waypoints_keyboard_rt())
+        if isinstance(parsed, tuple) and len(parsed) == 2 and isinstance(parsed[0], (int, float)):
+            lat, lon = parsed
+            start = st["start"]
+            d = haversine_km((start["lat"], start["lon"]), (lat, lon))
+            if d > MAX_RADIUS_KM:
+                send_message(chat_id, RT_TOO_FAR_WP, reply_markup=waypoints_keyboard_rt())
+                return
+            if len(st["waypoints_rt"]) >= MAX_WAYPOINTS_ROUNDTRIP:
+                send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS_ROUNDTRIP} waypoint per il Round Trip.")
+                return
+            st["waypoints_rt"].append({"lat": lat, "lon": lon})
+            st["phase"] = "waypoints_rt"
+            send_message(chat_id, ASK_WAYPOINTS_RT + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
             return
-        if len(st["waypoints_rt"]) >= MAX_WAYPOINTS_ROUNDTRIP:
-            send_message(chat_id, f"⚠️ Puoi aggiungere massimo {MAX_WAYPOINTS_ROUNDTRIP} waypoint per il Round Trip.")
+        if isinstance(parsed, tuple) and parsed[0] == "SUGGEST":
+            _, candidates = parsed
+            st["last_geo_candidates"] = candidates
+            st["geo_pick_phase"] = "wp_rt"
+            send_message(chat_id, CHOOSE_SUGGESTION, reply_markup=geocode_suggestions_keyboard(candidates))
             return
-        st["waypoints_rt"].append({"lat": loc[0], "lon": loc[1]})
-        st["phase"] = "waypoints_rt"
-        send_message(chat_id, ASK_WAYPOINTS_RT, reply_markup=waypoints_keyboard_rt())
+        send_message(chat_id, ASK_REPHRASE_OR_SUGGEST + "\n\n" + HOW_TO_POSITION, reply_markup=waypoints_keyboard_rt())
         return
 
     if phase == "choose_style":
